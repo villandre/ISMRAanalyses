@@ -81,7 +81,7 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
 
   combinedStack <- INLA::inla.stack(stackTraining, stackTest)
 
-  formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + INLA::f(space, model = spde, group = space.group, control.group = list(model = "ar1"))
+  formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1"))
 
   SPDEresult <- INLA::inla(
     formulaForSPDE,
