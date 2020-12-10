@@ -1,0 +1,10 @@
+Package: ISMRAanalyses
+Type: Package
+Title: Analyses for IS-MRA study
+Version: 0.1.0
+Author: Luc Villandre
+Maintainer: Luc Villandre <yourself@somewhere.net>
+Description: Meant to help reproduce the analyses in the IS-MRA study (Villandre et al. 2021)
+License: Not meant to be widely distributed
+Encoding: UTF-8
+LazyData: true
