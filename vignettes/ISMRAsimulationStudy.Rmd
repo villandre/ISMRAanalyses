@@ -1,0 +1,154 @@
+---
+title: "IS-MRA: Simulation study"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{IS-MRA: Simulation study}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+We start by simulating data. 
+```{r setup}
+library(ISMRAanalyses)
+library(sp)
+library(ISMRAanalyses)
+
+# setwd("/home/luc/INLAMRAfiles/INLAMRApaper1/simulations")
+setwd("/home/luc/ISMRAfiles/")
+```
+The simulated data are based on satellite imagery data obtained in Maharashtra. We first define a rectangular zone in the longitude-latitude projection. Since MODIS data are in the sinusoidal projection, we project the zone we just defined in that coordinate system.
+```{r}
+MaharashtraPolygonEdges <- rbind(c(18.8, 73.2), c(18.8, 73.4), c(18.6, 73.4), c(18.6, 73.2), c(18.8, 73.2))
+MaharashtraPolygonEdges <- MaharashtraPolygonEdges[ , 2:1]
+MaharashtraPolygon <- sp::SpatialPolygons(Srl = list(sp::Polygons(list(sp::Polygon(coords = MaharashtraPolygonEdges)), ID = "Mumbai")))
+raster::crs(MaharashtraPolygon) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+MaharashtraPolygonOtherCRS <- sp::spTransform(MaharashtraPolygon, CRSobj = sp::CRS("+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +R=6371007.181 +units=m +no_defs"))
+```
+We then import land cover and elevation values from the MODIS and ASTER data files we obtained from EarthData.
+```{r}
+folderForEarthDataFiles <- "/store/luc/rawDataFiles/"
+landCoverFiles <- list.files(folderForEarthDataFiles, pattern = "MCD*", full.names = TRUE)
+landCoverRasterSinusoidal <- produceLandCover(landCoverFiles, regionPolygon = MaharashtraPolygonOtherCRS)
+elevationFiles <- list.files(path = folderForEarthDataFiles, pattern = "*dem.tif", full.names = TRUE)
+elevationRasterList <- lapply(elevationFiles, raster::raster)
+```
+From the imported data, we produce the covariate matrix used in the simulations.
+```{r}
+dayOffset <- 121 # Days are listed numerically, from 1 to 366 (leap year). Day 121 corresponds to April 30.
+dayRange <- 27:29 # We extract data for May 27 until May 29.
+collectionDatesPOSIX <- as.POSIXct(paste("2012-05-", dayRange, sep = ""))
+covariateData <- prepareCovariateDataForISMRA(elevationRasterList, landCoverRasterSinusoidal, collectionDatesPOSIX)
+saveRDS(covariateData, file = "data/covariatesForSimulationStudy.rds", compress = TRUE)
+```
+We are now ready to simulate $1,000$ vectors from a spatiotemporal Gaussian process.
+```{r}
+timepoints <- as.numeric(time(covariateData@time))/(3600*24) # Time is in days
+
+# Parameter values based on real data analysis (cf. table 1 in paper)
+# Spatial parameters
+spSmoothness <- 1.5
+spRange <- 5.66
+spScale <- 4.14
+
+# Time parameters
+timeSmoothness <- 0.5
+timeRange <- 3.60
+timeScale <- 1
+
+# Uncorrelated error
+errorSD <- 0.5
+
+covfun <- function(spacetimeObject, timepointsVec) {
+  spatialDistances <- fields::rdist(spacetimeObject@sp@coords)
+  timeDistances <- fields::rdist(timepointsVec)
+  GPvecchia::MaternFun(spatialDistances, c(spScale^2, spRange, spSmoothness)) * GPvecchia::MaternFun(timeDistances, c(timeScale^2, timeRange, timeSmoothness))
+}
+
+covarStruct <- covfun(covariateData, timepoints) + errorSD^2 * diag(nrow(covariateData@data))
+
+choleskyDecomp <- t(chol(covarStruct))
+
+set.seed(10)
+
+numReplicates <- 1000
+fieldValuesWithError <- replicate(n = 1000, expr = as.numeric(choleskyDecomp %*% rnorm(nrow(covarStruct))))
+```
+We then add fixed effects to the field values, yielding the data we are going to model using the methods we selected for the simulation study.
+```{r}
+landCoverEffects <- c(
+  Water = 0,
+  EvergreenNeedleleaf = 1.09,
+  EvergreenBroadleaf = 0.979,
+  DeciduousBroadleaf = 1.181,
+  MixedForest = 1.087,
+  ClosedShrublands = 2.097,
+  OpenShrublands = 1.448,
+  WoodySavannas = 1.329,
+  Savannas = 1.393,
+  Grasslands = 1.506,
+  PermanentWetlands = 0.705,
+  Croplands = 1.588,
+  Urban = 1.623,
+  CroplandNaturalMosaics = 1.430,
+  NonVegetated = 0.667)
+
+# Water is the reference (landCover = 0)
+referenceLandCover <- "Water"
+referenceLandCoverIndex <- match(referenceLandCover, names(landCoverEffects))
+
+timeEffects <- c(
+  May27 = -0.033,
+  May28 = -6.319,
+  May29 = 1.155) + 0.033 # We're moving the reference day from May 25 to May 27, hence + 0.033
+elevationEffect <- -0.001
+interceptValue <- 40 # This is arbitrary. It should not affect the analyses.
+
+landCoverFactor <- factor(covariateData@data$landCover, levels = 0:14, labels = names(landCoverEffects))
+timepointsFactor <- factor(timepoints, levels = unique(timepoints), labels = names(timeEffects))
+
+referenceTimepoint <- "May27"
+referenceTimepointIndex <- match(referenceTimepoint, names(timeEffects))
+
+covariateMatrix <- cbind(model.matrix(object = ~ landCover, data = data.frame(landCover = landCoverFactor)), elevation = covariateData@data$elevation, model.matrix(object = ~ time, data = data.frame(time = timepointsFactor))[ , -1]) # We remove the intercept, which has already been created for land cover. Ocean and May 27 are reference categories.
+colnames(covariateMatrix) <- replace(colnames(covariateMatrix), which(colnames(covariateMatrix) == "(Intercept)"), "Intercept")
+fixedEffectsVec <- c(Intercept = interceptValue, landCoverEffects[-referenceLandCoverIndex], elevation = elevationEffect, timeEffects[-referenceTimepointIndex])
+colnames(covariateMatrix) <- gsub(pattern = "landCover", replacement = "", x = colnames(covariateMatrix))
+colnames(covariateMatrix) <- gsub(pattern = "time", replacement = "", x = colnames(covariateMatrix))
+
+# Getting the simulated values.
+
+observedValues <- fieldValuesWithError + as.vector(covariateMatrix %*% fixedEffectsVec[colnames(covariateMatrix)])
+
+# Fixing the covariate matrix
+landCoverTypes <- names(landCoverEffects)[-referenceLandCoverIndex]
+presentLandCoverTypes <- landCoverTypes[sapply(landCoverTypes, function(coverType) !all(covariateMatrix[ , coverType] == 0))]
+
+covariateMatrixNoAbsentLandCovers <- cbind(covariateMatrix[ , -match(landCoverTypes, colnames(covariateMatrix))], covariateMatrix[ , presentLandCoverTypes])
+
+simulatedDatasetsList <- list(
+  responses = observedValues,
+  covariates = covariateMatrixNoAbsentLandCovers[ , -match("Intercept", colnames(covariateMatrixNoAbsentLandCovers))],
+  coords = covariateData@sp@coords,
+  time = timepointsFactor,
+  timeNumeric = timepoints)
+
+saveRDS(simulatedDatasetsList, file = "data/dataForSimulations.rds", compress = TRUE)
+```
+
+As a sanity check, we can plot one of the simulated datasets.
+```{r, eval=TRUE}
+numRasterRows <- numRasterCols <- 48 # Approximate, hard to recover because data were collected in the sinusoidal projection, which does not translate to a perfectly-spaced grid of coordinates in the longitude/latitude projection.
+observationsToPlot <- which(simulatedDatasetsList$time == "May28")
+fields::quilt.plot(
+  x = simulatedDatasetsList$coords[ , "x"][observationsToPlot],
+  y = simulatedDatasetsList$coords[ , "y"][observationsToPlot],
+  z = simulatedDatasetsList$responses[observationsToPlot],
+  nx = numRasterRows, ny = numRasterCols)
+```
+

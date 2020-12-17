@@ -59,83 +59,13 @@ prepareCovariateDataForISMRA <- function(elevationsRasterListWGS, landCoverRaste
 
 fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNumeric, predCoordinatesMatrix, predCovariateMatrix, predTimeVecNumeric, numThreads = 1, dataCovarianceMatrix, control = list()) {
   control <- do.call("create.SPDE.control", control)
-  covariateFrame <- as.data.frame(covariateMatrix)
-  predCovariateFrame <- as.data.frame(predCovariateMatrix)
+
   timeVecTraining <- timeVecNumeric - min(timeVecNumeric) + 1
+  spaceAndTimeMesh <- buildSpaceAndTimeMesh(coordinatesMatrixTraining = coordinatesMatrix, timeVecNumericTraining = timeVecTraining, control = control)
+
+  covariateFrame <- as.data.frame(covariateMatrix)
   timeVecTest <- predTimeVecNumeric - min(predTimeVecNumeric) + 1
-  knots <- seq(1, max(timeVecTraining), length = max(timeVecTraining))
-  mesh1 <- INLA::inla.mesh.1d(loc = knots, degree = 2, boundary = "free")
-
-  ## generate space mesh
-
-  mesh2 <- INLA::inla.mesh.2d(loc = coordinatesMatrix[timeVecTraining == 1, ], cutoff = control$mesh.2d.cutoff, offset = control$mesh.2d.offset, max.n = control$mesh.2d.max.n)
-
-  # range0 and sigma0 control the prior means for the range and scale parameters.
-  # See Lindgren INLA tutorial page 5.
-  spatialSmoothness <- control$alpha - control$d/2 # cf p.3 INLA tutorial
-
-  # range0 and sigma0 seem to be the prior means...
-  range0 <- sqrt(8 * spatialSmoothness)/control$kappa # sqrt(8 * spatial smoothness) / Kappa. In my model, I use 1 as prior mean for spatial range and fix smoothness at 1.5. This means Kappa = 1.
-  lkappa0 <- log(8 * spatialSmoothness)/2 - log(range0)
-  ltau0 <- 0.5*log(gamma(spatialSmoothness)/(gamma(control$alpha)*(4*pi)^(control$d/2))) - log(control$sigma0) - spatialSmoothness * lkappa0
-
-  ## build the spatial spde
-  spde <- INLA::inla.spde2.matern(
-    mesh2,
-    B.tau = matrix(c(ltau0, -1, spatialSmoothness), 1, 3),
-    B.kappa = matrix(c(lkappa0, 0, -1), 1,3),
-    theta.prior.mean = c(0,0), theta.prior.prec = c(1/control$loghyperparaSDinMyModel^2, 1/control$loghyperparaSDinMyModel^2))
-
-  ## build the space time indices
-  STindex <- INLA::inla.spde.make.index("space", n.spde = spde$n.spde, n.group = mesh1$m)
-
-  ## Link data and process
-
-  Atraining <- INLA::inla.spde.make.A(mesh2, loc = coordinatesMatrix, group = timeVecTraining, group.mesh = mesh1)
-  Atest <- INLA::inla.spde.make.A(mesh2, loc = predCoordinatesMatrix, group = timeVecTest, group.mesh = mesh1)
-
-  stackTraining <- INLA::inla.stack(
-    data = list(y = responseVec),
-    A = c(list(Atraining), lapply(rep(1, ncol(covariateMatrix)), identity)),
-    effects = list(
-      c(STindex, list(intercept = 1)),
-      list(elevation = covariateFrame$elevation),
-      list(May28 = covariateFrame$May28),
-      list(May29 = covariateFrame$May29),
-      list(EvergreenBroadleaf = covariateFrame$EvergreenBroadleaf),
-      list(MixedForest = covariateFrame$MixedForest),
-      list(ClosedShrublands = covariateFrame$ClosedShrublands),
-      list(Savannas = covariateFrame$Savannas),
-      list(Grasslands = covariateFrame$Grasslands),
-      list(PermanentWetlands = covariateFrame$PermanentWetlands),
-      list(Croplands = covariateFrame$Croplands),
-      list(Urban = covariateFrame$Urban),
-      list(CroplandNaturalMosaics = covariateFrame$CroplandNaturalMosaics),
-      list(NonVegetated = covariateFrame$NonVegetated)
-    ), tag = "est")
-
-  stackTest <- INLA::inla.stack(
-    data = list(y = NA),
-    A = c(list(Atest), lapply(rep(1, ncol(predCovariateFrame)), identity)),
-    effects = list(
-      c(STindex, list(intercept = 1)),
-      list(elevation = predCovariateFrame$elevation),
-      list(May28 = predCovariateFrame$May28),
-      list(May29 = predCovariateFrame$May29),
-      list(EvergreenBroadleaf = predCovariateFrame$EvergreenBroadleaf),
-      list(MixedForest = predCovariateFrame$MixedForest),
-      list(ClosedShrublands = predCovariateFrame$ClosedShrublands),
-      list(Savannas = predCovariateFrame$Savannas),
-      list(Grasslands = predCovariateFrame$Grasslands),
-      list(PermanentWetlands = predCovariateFrame$PermanentWetlands),
-      list(Croplands = predCovariateFrame$Croplands),
-      list(Urban = predCovariateFrame$Urban),
-      list(CroplandNaturalMosaics = predCovariateFrame$CroplandNaturalMosaics),
-      list(NonVegetated = predCovariateFrame$NonVegetated)
-    ),
-    tag = 'predictions')
-
-  combinedStack <- INLA::inla.stack(stackTraining, stackTest)
+  combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrix, timeVecTraining = timeVecTraining, coordinatesMatrixTest = predCoordinatesMatrix, timeVecTest = timeVecTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVec = responseVec, covariateFrame = covariateFrame, control = control)
 
   formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1"))
 
@@ -144,7 +74,9 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
     data = INLA::inla.stack.data(combinedStack),
     control.predictor = list(compute = TRUE, A = INLA::inla.stack.A(combinedStack)),
     num.threads = numThreads)
-  list(fittedModel = SPDEresult, predictedValues = SPDEresult$summary.linear.predictor)
+  predsAndSDs <- getPredictionsAndSDsFromINLAoutputAlt(INLAoutput = SPDEresult, inlaStack = combinedStack, control = control)
+  list(fittedModel = SPDEresult, predictionMeans = predsAndSDs$mean,
+       predictionSDs = predsAndSDs$sd)
 }
 
 create.SPDE.control <- function(
@@ -193,7 +125,8 @@ fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, cova
   )
   list(
     fittedModel = ISMRAfit,
-    predictedValues = ISMRAfit$predictionMoments$predictMeans)
+    predictionMeans = ISMRAfit$predMoments$Mean,
+    predictionSDs = ISMRAfit$predMoments$SD)
 }
 
 create.ISMRA.control <- function(
@@ -239,7 +172,7 @@ fitVecchia <- function(responseVec, covariateMatrix, coordinatesMatrix, predCova
   predCoordinatesMatrixIncremented <- cbind(predCoordinatesMatrix, time = predTimeVecNumeric)
   VecchiaModelFit <- GPvecchia::vecchia_estimate(data = responseVec, locs = coordinatesMatrixIncremented, X = covariateMatrix, theta.ini = c(1, .1, 0.5), covmodel = dataCovarianceMatrix, output.level = 0)
   vecchiaPredicted <- GPvecchia::vecchia_pred(VecchiaModelFit, locs.pred = predCoordinatesMatrixIncremented, X.pred = predCovariateMatrix)
-  list(fittedModel = VecchiaModelFit, predictedValues = vecchiaPredicted)
+  list(fittedModel = VecchiaModelFit, predictionMeans = vecchiaPredicted)
 }
 
 fitModels <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNumeric, obsIndicesForTraining, funToFitSPDE, funToFitVecchia, funToFitISMRA, dataCovarianceMatrix = dataCovarianceMatrix, controlForVecchia = list(), controlForISMRA = list(), controlForSPDE = list(), numThreads) {
@@ -310,23 +243,31 @@ analysePartialResults <- function(folderForSimResults, pattern, datasetList, obs
 
 }
 
-getPredictionsFromINLAoutput <- function(INLAoutput, predictionLocations) {
+getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVec, covariateMatrixTest, coordinatesMatrixTest, timeVecNumericTest, covariateMatrixTraining, coordinatesMatrixTraining, timeVecNumericTraining, control) {
+  # Rebuilding components...
+  control <- do.call("create.SPDE.control", control)
+  covariateFrame <- as.data.frame(covariateMatrixTraining)
+  timeVecNumericTraining <- timeVecNumericTraining - min(timeVecNumericTraining) + 1
+  timeVecNumericTest <- timeVecNumericTest - min(timeVecNumericTest) + 1
+
+  spaceAndTimeMesh <- buildSpaceAndTimeMesh(coordinatesMatrixTraining = coordinatesMatrixTraining, timeVecNumericTraining = timeVecNumericTraining, control = control)
+
+  combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrixTraining, timeVecTraining = timeVecNumericTraining, coordinatesMatrixTest = coordinatesMatrixTest, timeVecTest = timeVecNumericTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVec = responseVec, covariateFrame = covariateFrame, control = control)
+
   preds <- INLAoutput$summary.linear.predictor
-  simdf <- testDataValidation@data
-  simdf$pred <- tail(preds$mean, n = nrow(simdf))
   stackIndex <- inla::inla.stack.index(combinedStack, "predictions")$data
-  preds$mean[stackIndex]
+  preds[stackIndex, c("mean", "sd")]
 }
 
 buildSpaceAndTimeMesh <- function(coordinatesMatrixTraining, timeVecNumericTraining, control) {
-  timeVecTraining <- timeVecNumericTraining - min(timeVecNumericTraining) + 1
-  knots <- seq(1, max(timeVecTraining), length = max(timeVecTraining))
+
+  knots <- seq(1, max(timeVecNumericTraining), length = max(timeVecNumericTraining))
   meshTime <- INLA::inla.mesh.1d(loc = knots, degree = 2, boundary = "free")
 
   ## generate space mesh
 
   meshSpace <- INLA::inla.mesh.2d(loc = coordinatesMatrixTraining[timeVecNumericTraining == 1, ], cutoff = control$mesh.2d.cutoff, offset = control$mesh.2d.offset, max.n = control$mesh.2d.max.n)
-  list(meshTime = meshTime, meshSpace = meshSpace)
+  list(time = meshTime, space = meshSpace)
 }
 
 buildInlaStack <- function(coordinatesMatrixTraining, timeVecTraining, coordinatesMatrixTest, timeVecTest, meshForSpace, meshForTime, responseVec, covariateFrame, control) {
@@ -395,3 +336,46 @@ buildInlaStack <- function(coordinatesMatrixTraining, timeVecTraining, coordinat
   INLA::inla.stack(stackTraining, stackTest)
 }
 
+getPredictionsAndSDsFromINLAoutputAlt <- function(INLAoutput, inlaStack, control) {
+  preds <- INLAoutput$summary.linear.predictor
+  stackIndex <- inla::inla.stack.index(inlaStack, "predictions")$data
+  preds[stackIndex, c("mean", "sd")]
+}
+
+# This will update saved simulation results with predictedValues,
+# which were missing due to a bug.
+# The new version of the software should not require this function.
+
+recomputePredictionsForSimOutputs <- function(folderForSimResults, patternForFilename = "(?<=Dataset).+(?=\\.rds)", coordinatesMatrixTraining, coordinatesMatrixTest, timeVecNumericTraining, timeVecNumericTest, covariateMatrixTraining, covariateMatrixTest, responseMatrix, control) {
+  filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
+
+  fixFunction <- function(filename, responseMatrix, covariateMatrixTraining, covariateMatrixTest, timeVecNumericTraining, timeVecNumericTest, coordinatesMatrixTraining, coordinatesMatrixTest) {
+    dataIndex <- as.numeric(stringr::str_extract(filename, pattern = patternForFilename))
+    simResults <- readRDS(filename)
+    responseVec <- responseMatrix[ , dataIndex]
+    SPDEpredMeansAndSDs <- getPredictionsAndSDsFromINLAoutput(
+      INLAoutput = simResults$SPDE$fittedModel,
+      responseVec = responseVec,
+      covariateMatrixTest = covariateMatrixTest,
+      coordinatesMatrixTest = coordinatesMatrixTest,
+      timeVecNumericTest = timeVecNumericTest,
+      covariateMatrixTraining = covariateMatrixTraining,
+      coordinatesMatrixTraining =  coordinatesMatrixTraining,
+      timeVecNumericTraining = timeVecNumericTraining,
+      control = control)
+    ISMRApredsAndSDs <- simResults$ISMRA$fittedModel$predMoments[ , c("Mean", "SD")]
+    updatedSimResultsSPDE <- list(
+      fittedModel = simResults$SPDE$fittedModel,
+      predictionMeans = SPDEpredMeansAndSDs$mean,
+      predictionSDs = SPDEpredMeansAndSDs$sd)
+    updatedSimResultsISMRA <- list(
+      fittedModel = simResults$ISMRA$fittedModel,
+      predictionMeans = ISMRApredsAndSDs$Mean,
+      predictionSDs = SPDEpredMeansAndSDs$SD)
+    simResultsUpdate <- list(SPDE = updatedSimResultsSPDE, ISMRA = updatedSimResultsSPDE)
+    # saveRDS(simResultsUpdate, file = filename, compress = TRUE)
+    cat("Updated predictions in ", filename, "\n")
+    invisible(NULL)
+  }
+  lapply(filesToImport, fixFunction , responseMatrix = responseMatrix, covariateMatrixTraining = covariateMatrixTraining,  timeVecNumericTraining = timeVecNumericTraining, covariateMatrixTest = covariateMatrixTest, timeVecNumericTest = timeVecNumericTest, coordinatesMatrixTraining = coordinatesMatrixTraining, coordinatesMatrixTest = coordinatesMatrixTest)
+}

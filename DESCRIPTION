@@ -8,3 +8,7 @@ Description: Meant to help reproduce the analyses in the IS-MRA study (Villandre
 License: Not meant to be widely distributed
 Encoding: UTF-8
 LazyData: true
+Suggests: 
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
