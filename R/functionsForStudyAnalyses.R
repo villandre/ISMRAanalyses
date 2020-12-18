@@ -68,14 +68,26 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
 
   formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1"))
 
-  SPDEresult <- INLA::inla(
-    formulaForSPDE,
-    data = INLA::inla.stack.data(combinedStack),
-    control.predictor = list(compute = TRUE, A = INLA::inla.stack.A(combinedStack)),
-    num.threads = numThreads)
+  SPDEresult <- tryCatch(
+    expr = INLA::inla(
+      formulaForSPDE,
+      data = INLA::inla.stack.data(combinedStack),
+      control.predictor = list(compute = TRUE, A = INLA::inla.stack.A(combinedStack)),
+      num.threads = numThreads), error = function(e) e, finally = "Error in fitting SPDE! Return list will contain NAs.\n")
   predsAndSDs <- getPredictionsAndSDsFromINLAoutputAlt(INLAoutput = SPDEresult, inlaStack = combinedStack, control = control)
-  list(fittedModel = SPDEresult, predictionMeans = predsAndSDs$mean,
-       predictionSDs = predsAndSDs$sd)
+  returnResult <- NULL
+  if (!("simpleError" %in% class(SPDEresult))) {
+    returnResult <- list(
+      fittedModel = SPDEresult,
+      predictionMeans = predsAndSDs$mean,
+      predictionSDs = predsAndSDs$sd)
+  } else {
+    returnResult <- list(
+      fittedModel = NA,
+      predictionMeans = NA,
+      predictionSDs = NA)
+  }
+  returnResult
 }
 
 create.SPDE.control <- function(
@@ -105,7 +117,7 @@ fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, cova
     fixedEffSD = c(mu = control$fixedHyperValues$fixedEffSD, sigma = control$logHyperpriorSD)
   )
 
-  ISMRAfit <- MRAINLA::INLAMRA(
+  ISMRAfit <- tryCatch(expr = MRAINLA::INLAMRA(
     responseVec = responseVec,
     covariateFrame = as.data.frame(covariateMatrix),
     spatialCoordMat = as.matrix(coordinatesMatrix),
@@ -121,11 +133,20 @@ fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, cova
     errorSDlist = list(start = control$fixedHyperValues$errorSD),
     fixedEffSDlist = list(start = control$fixedHyperValues$fixedEffSD),
     control = control$control
-  )
-  list(
+  ), error = function(e) e, finally = cat("ISMRA analysis failed! Return list will contain NAs.\n"))
+  returnResult <- NULL
+  if (!("simpleError" %in% class(ISMRAfit))) {
+  returnResult <- list(
     fittedModel = ISMRAfit,
     predictionMeans = ISMRAfit$predMoments$Mean,
     predictionSDs = ISMRAfit$predMoments$SD)
+  } else {
+    returnResult <- list(
+      fittedModel = NA,
+      predictionMeans = NA,
+      predictionSDs = NA)
+  }
+  returnResult
 }
 
 create.ISMRA.control <- function(
@@ -200,18 +221,34 @@ fitModels <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNu
 # If saveDirectory is provided, simulationFun does not return anything.
 # Might be preferable from a memory standpoint if outputs are large.
 
-simulationFun <- function(datasetIndex, responseMatrix, covariateMatrix, coordinatesMatrix, timeVecNumeric, obsIndicesForTraining, funToFitSPDE, funToFitVecchia, funToFitISMRA, dataCovarianceMatrix, controlForVecchia = list(), controlForISMRA = list(), controlForSPDE = list(), saveDirectory = NULL, numThreads = 1) {
+simulationFun <- function(datasetIndex, responseMatrix, covariateMatrix, coordinatesMatrix, timeVecNumeric, obsIndicesForTraining, funToFitSPDE = fitSPDE, funToFitVecchia = fitVecchia, funToFitISMRA = fitISMRA, dataCovarianceMatrix, controlForVecchia = list(), controlForISMRA = list(), controlForSPDE = list(), saveDirectory = NULL, numThreads = 1, resume = FALSE) {
   cat("Processing simulated dataset", datasetIndex, "... ")
-  fittedModel <- fitModels(responseVec = responseMatrix[ , datasetIndex], covariateMatrix = covariateMatrix, coordinatesMatrix = coordinatesMatrix, timeVecNumeric = timeVecNumeric, obsIndicesForTraining = obsIndicesForTraining, funToFitSPDE = funToFitSPDE, funToFitVecchia = funToFitVecchia, funToFitISMRA = funToFitISMRA, dataCovarianceMatrix = dataCovarianceMatrix, controlForVecchia = controlForVecchia, controlForISMRA = controlForISMRA, controlForSPDE = controlForSPDE, numThreads = numThreads)
-  if (!is.null(saveDirectory)) {
+  resultAvailable <- FALSE
+  if (resume) {
+    cat("Checking if dataset has already been handled... \n")
     filename <- paste(saveDirectory, "/ISMRAsimulationResults_Dataset", datasetIndex, ".rds", sep = "")
-    saveRDS(fittedModel, file = filename, compress = TRUE)
-    return(NULL)
-  } else {
-    return(fittedModel)
+    resultAvailable <- file.exists(filename)
+    if (resultAvailable) {
+      cat("File ", filename, "already exists! Skipping...")
+    }
   }
-  cat("Done! \n")
-  NULL
+  fittedModel <- NULL
+  if (!resultAvailable) {
+    fittedModel <- fitModels(responseVec = responseMatrix[ , datasetIndex], covariateMatrix = covariateMatrix, coordinatesMatrix = coordinatesMatrix, timeVecNumeric = timeVecNumeric, obsIndicesForTraining = obsIndicesForTraining, funToFitSPDE = funToFitSPDE, funToFitVecchia = funToFitVecchia, funToFitISMRA = funToFitISMRA, dataCovarianceMatrix = dataCovarianceMatrix, controlForVecchia = controlForVecchia, controlForISMRA = controlForISMRA, controlForSPDE = controlForSPDE, numThreads = numThreads)
+    if (!is.null(saveDirectory)) {
+      filename <- paste(saveDirectory, "/ISMRAsimulationResults_Dataset", datasetIndex, ".rds", sep = "")
+      saveRDS(fittedModel, file = filename, compress = TRUE)
+      return(NULL)
+    } else {
+      return(fittedModel)
+    }
+    cat("Done! \n")
+  }
+  returnResult <- NULL
+  if (is.null(saveDirectory)) {
+    returnResult <- fittedModel
+  }
+  invisible(returnResult)
 }
 
 analysePredResults <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining) {
@@ -267,7 +304,6 @@ getFEmeansAndSDs <- function(outputObject) {
 getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVecTraining, covariateMatrixTest, coordinatesMatrixTest, timeVecNumericTest, covariateMatrixTraining, coordinatesMatrixTraining, timeVecNumericTraining, control) {
   # Rebuilding components...
   control <- do.call("create.SPDE.control", control)
-  covariateFrame <- as.data.frame(covariateMatrixTraining)
   timeVecNumericTraining <- timeVecNumericTraining - min(timeVecNumericTraining) + 1
   timeVecNumericTest <- timeVecNumericTest - min(timeVecNumericTest) + 1
 
