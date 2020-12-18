@@ -63,9 +63,8 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
   timeVecTraining <- timeVecNumeric - min(timeVecNumeric) + 1
   spaceAndTimeMesh <- buildSpaceAndTimeMesh(coordinatesMatrixTraining = coordinatesMatrix, timeVecNumericTraining = timeVecTraining, control = control)
 
-  covariateFrame <- as.data.frame(covariateMatrix)
   timeVecTest <- predTimeVecNumeric - min(predTimeVecNumeric) + 1
-  combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrix, timeVecTraining = timeVecTraining, coordinatesMatrixTest = predCoordinatesMatrix, timeVecTest = timeVecTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVec = responseVec, covariateFrame = covariateFrame, control = control)
+  combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrix, timeVecTraining = timeVecTraining, coordinatesMatrixTest = predCoordinatesMatrix, timeVecTest = timeVecTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVecTraining = responseVec, covariateMatrixTraining = covariateMatrix, covariateMatrixTest = predCovariateMatrix, control = control)
 
   formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1"))
 
@@ -106,7 +105,7 @@ fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, cova
     fixedEffSD = c(mu = control$fixedHyperValues$fixedEffSD, sigma = control$logHyperpriorSD)
   )
 
-  ISMRAfit <- MRAinla::INLAMRA(
+  ISMRAfit <- MRAINLA::INLAMRA(
     responseVec = responseVec,
     covariateFrame = as.data.frame(covariateMatrix),
     spatialCoordMat = as.matrix(coordinatesMatrix),
@@ -164,7 +163,7 @@ customCovFct <- function(locs1, locs2) {
   })
   distValues <- geosphere::distHaversine(locsValues[[1]][ , 1:2], locsValues[[2]][ , 1:2])/1000
   timeDistValues <- abs(locsValues[[1]][ , 3] - locsValues[[2]][ , 3])
-  MRAinla::maternCov(distValues, smoothness = 1.5, rho = 1, scale = 1) * MRAinla::maternCov(timeDistValues, smoothness = 0.5, rho = 1, scale = 1)
+  MRAINLA::maternCov(distValues, smoothness = 1.5, rho = 1, scale = 1) * MRAINLA::maternCov(timeDistValues, smoothness = 0.5, rho = 1, scale = 1)
 }
 
 fitVecchia <- function(responseVec, covariateMatrix, coordinatesMatrix, predCovariateMatrix, predCoordinatesMatrix, timeVecNumeric, predTimeVecNumeric, dataCovarianceMatrix) {
@@ -215,35 +214,57 @@ simulationFun <- function(datasetIndex, responseMatrix, covariateMatrix, coordin
   NULL
 }
 
-analysePartialResults <- function(folderForSimResults, pattern, datasetList, obsIndicesForTraining) {
-  filesToImport <- list.files(folderForSimResults, pattern = pattern, full.names = TRUE)
-  filesIndices <- as.numeric(stringr::str_extract(filesToImport, pattern = "(?<=Dataset).+(?=\\.rds)"))
+analysePredResults <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining) {
+  patternForExtractingNumber <- "[:digit:]+(?=\\.rds)"
+  filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
+  filesIndices <- as.numeric(stringr::str_extract(filesToImport, pattern = patternForExtractingNumber))
   filesToImportInOrder <- filesToImport[order(filesIndices)]
 
-  computePredStatsFromISMRA <- function(ISMRAoutput, realTestValues) {
-      predictions <- ISMRAoutput$fittedModel$predMoments$Mean
-      MSE <- mean((realTestValues - predictions)^2)
-      MeanSD <- mean(ISMRAoutput$fittedModel$predMoments$SD)
-      list(MSE = MSE, MeanSD = MeanSD)
+  computePredStats <- function(filename, obsIndicesForTraining, simulatedDataList) {
+    datasetIndex <- as.numeric(stringr::str_extract(filename, pattern = patternForExtractingNumber))
+    simResults <- readRDS(filename)
+    realValues <- simulatedDataList$responses[!obsIndicesForTraining, datasetIndex]
+    lapply(simResults, function(modelResult) {
+      c(MSPE = mean((modelResult$predictionMeans - realValues)^2), MedSPE = median((modelResult$predictionMeans - realValues)^2), MeanSD = mean(modelResult$predictionSDs), MedSD = median(modelResult$predictionSDs))
+    })
   }
-
-  computePredStatsFromSPDE <- function(SPDEoutput, realTestValues) {
-    predictions <- ISMRAoutput$fittedModel$predMoments$Mean
-    MSE <- mean((realTestValues - predictions)^2)
-    MeanSD <- mean(ISMRAoutput$fittedModel$predMoments$SD)
-    list(MSE = MSE, MeanSD = MeanSD)
+  predStatsByDataset <- lapply(filesToImportInOrder, computePredStats, obsIndicesForTraining = obsIndicesForTraining, simulatedDataList = simulatedDataList)
+  methodNames <- names(predStatsByDataset[[1]])
+  predStatsByMethod <- lapply(methodNames, function(methodName) {
+    sapply(predStatsByDataset, "[[", methodName)
+  })
+  getStatsByMethod <- function(resultMatrix) {
+    t(apply(resultMatrix, 1, function(rowValues) c(Mean = mean(rowValues), SD = sd(rowValues), Minimum = min(rowValues), Maximum = max(rowValues), Median = median(rowValues))))
   }
-
-  computePredStats <- function(datasetIndex, obsIndicesForTraining, datasetList, filesToImportInOrder) {
-    realTestValues <- datasetList$responses[!obsIndicesForTraining, datasetIndex]
-
-  }
-
-  predictionStatisticsByDataset <- lapply(sort(filesIndices), computePredStats, obsIndicesForTraining = obsIndicesForTraining, datasetList = datasetList, filesToImportInOrder = filesToImportInOrder)
-
+  lapply(predStatsByMethod, getStatsByMethod)
 }
 
-getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVec, covariateMatrixTest, coordinatesMatrixTest, timeVecNumericTest, covariateMatrixTraining, coordinatesMatrixTraining, timeVecNumericTraining, control) {
+analyseParaEsts <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining, realFEs, realHyperpars) {
+  patternForExtractingNumber <- "[:digit:]+(?=\\.rds)"
+  filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
+  filesIndices <- as.numeric(stringr::str_extract(filesToImport, pattern = patternForExtractingNumber))
+  filesToImportInOrder <- filesToImport[order(filesIndices)]
+  computePredStats <- function(filename, realFEs, realHyperpars) {
+    datasetIndex <- as.numeric(stringr::str_extract(filename, pattern = patternForExtractingNumber))
+    simResults <- readRDS(filename)
+    lapply(simResults, function(modelResult) {
+      c(absDiff = hhh)
+    })
+  }
+  predStatsByDataset <- lapply(filesToImportInOrder, computePredStats, obsIndicesForTraining = obsIndicesForTraining, simulatedDataList = simulatedDataList)
+}
+
+getFEmeansAndSDs <- function(outputObject) {
+  output <- NULL
+  if ("INLAMRA" %in% class(outputObject)) {
+    output <- outputObject$FEmarginalMoments[ , c("Mean", "StdDev")]
+  } else if ("inla" %in% class(outputObject)) {
+    output <- outputObject$summary.fixed[, c("mean", "sd")]
+  }
+  output
+}
+
+getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVecTraining, covariateMatrixTest, coordinatesMatrixTest, timeVecNumericTest, covariateMatrixTraining, coordinatesMatrixTraining, timeVecNumericTraining, control) {
   # Rebuilding components...
   control <- do.call("create.SPDE.control", control)
   covariateFrame <- as.data.frame(covariateMatrixTraining)
@@ -252,10 +273,10 @@ getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVec, covariat
 
   spaceAndTimeMesh <- buildSpaceAndTimeMesh(coordinatesMatrixTraining = coordinatesMatrixTraining, timeVecNumericTraining = timeVecNumericTraining, control = control)
 
-  combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrixTraining, timeVecTraining = timeVecNumericTraining, coordinatesMatrixTest = coordinatesMatrixTest, timeVecTest = timeVecNumericTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVec = responseVec, covariateFrame = covariateFrame, control = control)
+  combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrixTraining, timeVecTraining = timeVecNumericTraining, coordinatesMatrixTest = coordinatesMatrixTest, timeVecTest = timeVecNumericTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVecTraining = responseVecTraining, covariateMatrixTraining = covariateMatrixTraining, covariateMatrixTest = covariateMatrixTest, control = control)
 
   preds <- INLAoutput$summary.linear.predictor
-  stackIndex <- inla::inla.stack.index(combinedStack, "predictions")$data
+  stackIndex <- INLA::inla.stack.index(combinedStack, "predictions")$data
   preds[stackIndex, c("mean", "sd")]
 }
 
@@ -270,7 +291,7 @@ buildSpaceAndTimeMesh <- function(coordinatesMatrixTraining, timeVecNumericTrain
   list(time = meshTime, space = meshSpace)
 }
 
-buildInlaStack <- function(coordinatesMatrixTraining, timeVecTraining, coordinatesMatrixTest, timeVecTest, meshForSpace, meshForTime, responseVec, covariateFrame, control) {
+buildInlaStack <- function(coordinatesMatrixTraining, timeVecTraining, coordinatesMatrixTest, timeVecTest, meshForSpace, meshForTime, responseVecTraining, covariateMatrixTraining, covariateMatrixTest, control) {
   # range0 and sigma0 control the prior means for the range and scale parameters.
   # See Lindgren INLA tutorial page 5.
   spatialSmoothness <- control$alpha - control$d/2 # cf p.3 INLA tutorial
@@ -291,10 +312,12 @@ buildInlaStack <- function(coordinatesMatrixTraining, timeVecTraining, coordinat
 
   Atraining <- INLA::inla.spde.make.A(meshForSpace, loc = coordinatesMatrixTraining, group = timeVecTraining, group.mesh = meshForTime)
   Atest <- INLA::inla.spde.make.A(meshForSpace, loc = coordinatesMatrixTest, group = timeVecTest, group.mesh = meshForTime)
+  covariateFrame <- as.data.frame(covariateMatrixTraining)
+  predCovariateFrame <- as.data.frame(covariateMatrixTest)
 
   stackTraining <- INLA::inla.stack(
-    data = list(y = responseVec),
-    A = c(list(Atraining), lapply(rep(1, ncol(covariateMatrix)), identity)),
+    data = list(y = responseVecTraining),
+    A = c(list(Atraining), lapply(rep(1, ncol(covariateFrame)), identity)),
     effects = list(
       c(STindex, list(intercept = 1)),
       list(elevation = covariateFrame$elevation),
@@ -338,7 +361,7 @@ buildInlaStack <- function(coordinatesMatrixTraining, timeVecTraining, coordinat
 
 getPredictionsAndSDsFromINLAoutputAlt <- function(INLAoutput, inlaStack, control) {
   preds <- INLAoutput$summary.linear.predictor
-  stackIndex <- inla::inla.stack.index(inlaStack, "predictions")$data
+  stackIndex <- INLA::inla.stack.index(inlaStack, "predictions")$data
   preds[stackIndex, c("mean", "sd")]
 }
 
@@ -346,23 +369,23 @@ getPredictionsAndSDsFromINLAoutputAlt <- function(INLAoutput, inlaStack, control
 # which were missing due to a bug.
 # The new version of the software should not require this function.
 
-recomputePredictionsForSimOutputs <- function(folderForSimResults, patternForFilename = "(?<=Dataset).+(?=\\.rds)", coordinatesMatrixTraining, coordinatesMatrixTest, timeVecNumericTraining, timeVecNumericTest, covariateMatrixTraining, covariateMatrixTest, responseMatrix, control) {
+recomputePredictionsForSimOutputs <- function(folderForSimResults, patternForFilename = "Dataset.+\\.rds$", coordinatesMatrixTraining, coordinatesMatrixTest, timeVecNumericTraining, timeVecNumericTest, covariateMatrixTraining, covariateMatrixTest, responseMatrixTraining, controlForSPDE) {
   filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
 
-  fixFunction <- function(filename, responseMatrix, covariateMatrixTraining, covariateMatrixTest, timeVecNumericTraining, timeVecNumericTest, coordinatesMatrixTraining, coordinatesMatrixTest) {
-    dataIndex <- as.numeric(stringr::str_extract(filename, pattern = patternForFilename))
+  fixFunction <- function(filename, responseMatrixTraining, covariateMatrixTraining, covariateMatrixTest, timeVecNumericTraining, timeVecNumericTest, coordinatesMatrixTraining, coordinatesMatrixTest) {
+    dataIndex <- as.numeric(stringr::str_extract(filename, pattern = "[:digit:]+(?=\\.rds)"))
     simResults <- readRDS(filename)
-    responseVec <- responseMatrix[ , dataIndex]
+    responseVec <- responseMatrixTraining[ , dataIndex]
     SPDEpredMeansAndSDs <- getPredictionsAndSDsFromINLAoutput(
       INLAoutput = simResults$SPDE$fittedModel,
-      responseVec = responseVec,
+      responseVecTraining = responseVec,
       covariateMatrixTest = covariateMatrixTest,
       coordinatesMatrixTest = coordinatesMatrixTest,
       timeVecNumericTest = timeVecNumericTest,
       covariateMatrixTraining = covariateMatrixTraining,
       coordinatesMatrixTraining =  coordinatesMatrixTraining,
       timeVecNumericTraining = timeVecNumericTraining,
-      control = control)
+      control = controlForSPDE)
     ISMRApredsAndSDs <- simResults$ISMRA$fittedModel$predMoments[ , c("Mean", "SD")]
     updatedSimResultsSPDE <- list(
       fittedModel = simResults$SPDE$fittedModel,
@@ -371,11 +394,11 @@ recomputePredictionsForSimOutputs <- function(folderForSimResults, patternForFil
     updatedSimResultsISMRA <- list(
       fittedModel = simResults$ISMRA$fittedModel,
       predictionMeans = ISMRApredsAndSDs$Mean,
-      predictionSDs = SPDEpredMeansAndSDs$SD)
-    simResultsUpdate <- list(SPDE = updatedSimResultsSPDE, ISMRA = updatedSimResultsSPDE)
-    # saveRDS(simResultsUpdate, file = filename, compress = TRUE)
+      predictionSDs = ISMRApredsAndSDs$SD)
+    simResultsUpdate <- list(SPDE = updatedSimResultsSPDE, ISMRA = updatedSimResultsISMRA)
+    saveRDS(simResultsUpdate, file = filename, compress = TRUE)
     cat("Updated predictions in ", filename, "\n")
     invisible(NULL)
   }
-  lapply(filesToImport, fixFunction , responseMatrix = responseMatrix, covariateMatrixTraining = covariateMatrixTraining,  timeVecNumericTraining = timeVecNumericTraining, covariateMatrixTest = covariateMatrixTest, timeVecNumericTest = timeVecNumericTest, coordinatesMatrixTraining = coordinatesMatrixTraining, coordinatesMatrixTest = coordinatesMatrixTest)
+  lapply(filesToImport, fixFunction , responseMatrixTraining = responseMatrixTraining, covariateMatrixTraining = covariateMatrixTraining,  timeVecNumericTraining = timeVecNumericTraining, covariateMatrixTest = covariateMatrixTest, timeVecNumericTest = timeVecNumericTest, coordinatesMatrixTraining = coordinatesMatrixTraining, coordinatesMatrixTest = coordinatesMatrixTest)
 }

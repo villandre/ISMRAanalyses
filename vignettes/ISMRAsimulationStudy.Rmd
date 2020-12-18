@@ -15,15 +15,17 @@ knitr::opts_chunk$set(
 ```
 We start by simulating data. 
 ```{r setup}
+if ("package:ISMRAanalyses" %in% search()) {
+  detach("package:ISMRAanalyses", unload = TRUE)
+}
 library(ISMRAanalyses)
 library(sp)
-library(ISMRAanalyses)
 
 # setwd("/home/luc/INLAMRAfiles/INLAMRApaper1/simulations")
 setwd("/home/luc/ISMRAfiles/")
 ```
 The simulated data are based on satellite imagery data obtained in Maharashtra. We first define a rectangular zone in the longitude-latitude projection. Since MODIS data are in the sinusoidal projection, we project the zone we just defined in that coordinate system.
-```{r}
+```{r, eval=FALSE}
 MaharashtraPolygonEdges <- rbind(c(18.8, 73.2), c(18.8, 73.4), c(18.6, 73.4), c(18.6, 73.2), c(18.8, 73.2))
 MaharashtraPolygonEdges <- MaharashtraPolygonEdges[ , 2:1]
 MaharashtraPolygon <- sp::SpatialPolygons(Srl = list(sp::Polygons(list(sp::Polygon(coords = MaharashtraPolygonEdges)), ID = "Mumbai")))
@@ -31,7 +33,7 @@ raster::crs(MaharashtraPolygon) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs 
 MaharashtraPolygonOtherCRS <- sp::spTransform(MaharashtraPolygon, CRSobj = sp::CRS("+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +R=6371007.181 +units=m +no_defs"))
 ```
 We then import land cover and elevation values from the MODIS and ASTER data files we obtained from EarthData.
-```{r}
+```{r, eval=FALSE}
 folderForEarthDataFiles <- "/store/luc/rawDataFiles/"
 landCoverFiles <- list.files(folderForEarthDataFiles, pattern = "MCD*", full.names = TRUE)
 landCoverRasterSinusoidal <- produceLandCover(landCoverFiles, regionPolygon = MaharashtraPolygonOtherCRS)
@@ -39,7 +41,7 @@ elevationFiles <- list.files(path = folderForEarthDataFiles, pattern = "*dem.tif
 elevationRasterList <- lapply(elevationFiles, raster::raster)
 ```
 From the imported data, we produce the covariate matrix used in the simulations.
-```{r}
+```{r, eval=FALSE}
 dayOffset <- 121 # Days are listed numerically, from 1 to 366 (leap year). Day 121 corresponds to April 30.
 dayRange <- 27:29 # We extract data for May 27 until May 29.
 collectionDatesPOSIX <- as.POSIXct(paste("2012-05-", dayRange, sep = ""))
@@ -47,7 +49,7 @@ covariateData <- prepareCovariateDataForISMRA(elevationRasterList, landCoverRast
 saveRDS(covariateData, file = "data/covariatesForSimulationStudy.rds", compress = TRUE)
 ```
 We are now ready to simulate $1,000$ vectors from a spatiotemporal Gaussian process.
-```{r}
+```{r, eval=FALSE}
 timepoints <- as.numeric(time(covariateData@time))/(3600*24) # Time is in days
 
 # Parameter values based on real data analysis (cf. table 1 in paper)
@@ -80,7 +82,7 @@ numReplicates <- 1000
 fieldValuesWithError <- replicate(n = 1000, expr = as.numeric(choleskyDecomp %*% rnorm(nrow(covarStruct))))
 ```
 We then add fixed effects to the field values, yielding the data we are going to model using the methods we selected for the simulation study.
-```{r}
+```{r, eval=FALSE}
 landCoverEffects <- c(
   Water = 0,
   EvergreenNeedleleaf = 1.09,
@@ -140,9 +142,8 @@ simulatedDatasetsList <- list(
 
 saveRDS(simulatedDatasetsList, file = "data/dataForSimulations.rds", compress = TRUE)
 ```
-
 As a sanity check, we can plot one of the simulated datasets.
-```{r, eval=TRUE}
+```{r, eval=FALSE}
 numRasterRows <- numRasterCols <- 48 # Approximate, hard to recover because data were collected in the sinusoidal projection, which does not translate to a perfectly-spaced grid of coordinates in the longitude/latitude projection.
 observationsToPlot <- which(simulatedDatasetsList$time == "May28")
 fields::quilt.plot(
@@ -151,4 +152,76 @@ fields::quilt.plot(
   z = simulatedDatasetsList$responses[observationsToPlot],
   nx = numRasterRows, ny = numRasterCols)
 ```
+We now begin the simulations per se.
+```{r, eval=FALSE}
+simulatedDatasetsList <- readRDS("data/dataForSimulations.rds")
+colnames(simulatedDatasetsList$coords) <- c("longitude", "latitude")
+simulatedDatasetsList$coords <- as.data.frame(simulatedDatasetsList$coords)
+
+longitudeQuantiles <- quantile(simulatedDatasetsList$coords$longitude, probs = c(0.25, 0.75))
+latitudeQuantiles <- quantile(simulatedDatasetsList$coords$latitude, probs = c(0.25, 0.75))
+
+obsIndicesForTraining <-
+  !((simulatedDatasetsList$time == "May28") &
+      (simulatedDatasetsList$coords$longitude <= longitudeQuantiles[[2]]) &
+      (simulatedDatasetsList$coords$longitude >= longitudeQuantiles[[1]]) &
+      (simulatedDatasetsList$coords$latitude <= latitudeQuantiles[[2]]) &
+      (simulatedDatasetsList$coords$latitude >= latitudeQuantiles[[1]]))
+
+# For Vecchia
+
+# dataCovarianceMatrix <- matrix(0, nrow(simulatedDatasetsList$responses), nrow(simulatedDatasetsList$responses))
+# allCoordsWithTime <- cbind(simulatedDatasetsList$coords, time = simulatedDatasetsList$timeNumeric)
+#
+# for (i in 1:nrow(dataCovarianceMatrix)) {
+#   dataCovarianceMatrix[i:nrow(dataCovarianceMatrix), i] <- customCovFct(allCoordsWithTime[i, ], allCoordsWithTime[i:nrow(dataCovarianceMatrix), ])
+# }
+# dataCovarianceMatrix[upper.tri(dataCovarianceMatrix)] <- dataCovarianceMatrix[lower.tri(dataCovarianceMatrix)]
+
+fittedModelsByDataset <- lapply(
+  X = 1:250, # Let's start with 250 datasets...
+  FUN = simulationFun,
+  responseMatrix = simulatedDatasetsList$responses,
+  covariateMatrix = simulatedDatasetsList$covariates,
+  coordinatesMatrix = as.matrix(simulatedDatasetsList$coords),
+  timeVecNumeric = simulatedDatasetsList$timeNumeric,
+  obsIndicesForTraining = obsIndicesForTraining,
+  funToFitSPDE = fitSPDE,
+  funToFitVecchia = fitVecchia,
+  funToFitISMRA = fitISMRA,
+  dataCovarianceMatrix = NULL,
+  numThreads = 4,
+  controlForSPDE = list(mesh.2d.max.n = c(100, 100),
+                        mesh.2d.offset = c(5,5)
+                        ),
+  controlForISMRA = list(control = list(
+    Mlon = 2,
+    Mlat = 2,
+    Mtime = 0,
+    numKnotsRes0 = 20,
+    numIterOptim = 20,
+    tipKnotsThinningRate = 1,
+    numValuesForIS = 125
+  )),
+  saveDirectory = "outputFiles/")
+```
+(DELETE ME ONCE CHANGE HAS BEEN PROCESSED: I'M FIXING AN ISSUE WITH OUTPUT FROM A PREVIOUS VERSION)
+```{r, eval=FALSE}
+simulatedDatasetsList <- readRDS("data/dataForSimulations.rds")
+colnames(simulatedDatasetsList$coords) <- c("longitude", "latitude")
+simulatedDatasetsList$coords <- as.data.frame(simulatedDatasetsList$coords)
+
+longitudeQuantiles <- quantile(simulatedDatasetsList$coords$longitude, probs = c(0.25, 0.75))
+latitudeQuantiles <- quantile(simulatedDatasetsList$coords$latitude, probs = c(0.25, 0.75))
+
+obsIndicesForTraining <-
+  !((simulatedDatasetsList$time == "May28") &
+      (simulatedDatasetsList$coords$longitude <= longitudeQuantiles[[2]]) &
+      (simulatedDatasetsList$coords$longitude >= longitudeQuantiles[[1]]) &
+      (simulatedDatasetsList$coords$latitude <= latitudeQuantiles[[2]]) &
+      (simulatedDatasetsList$coords$latitude >= latitudeQuantiles[[1]]))
+
+recomputePredictionsForSimOutputs(folderForSimResults = "outputFiles/", patternForFilename = "Dataset.+\\.rds$", coordinatesMatrixTraining = as.matrix(simulatedDatasetsList$coords)[obsIndicesForTraining, ], coordinatesMatrixTest = as.matrix(simulatedDatasetsList$coords)[!obsIndicesForTraining, ], timeVecNumericTraining = simulatedDatasetsList$timeNumeric[obsIndicesForTraining], timeVecNumericTest = simulatedDatasetsList$timeNumeric[!obsIndicesForTraining], covariateMatrixTraining = simulatedDatasetsList$covariates[obsIndicesForTraining, ], covariateMatrixTest = simulatedDatasetsList$covariates[!obsIndicesForTraining, ], responseMatrixTraining = simulatedDatasetsList$responses[obsIndicesForTraining, ], controlForSPDE = do.call("create.SPDE.control", list(mesh.2d.max.n = c(100, 100), mesh.2d.offset = c(5,5))))
+```
+
 
