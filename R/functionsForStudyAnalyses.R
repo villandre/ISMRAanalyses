@@ -67,10 +67,10 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
   spde <- INLA::inla.spde2.matern(
     mesh = spaceAndTimeMesh$space,
     B.tau = matrix(c(inlaParameters$ltau0, -1, inlaParameters$spatialSmoothness), 1, 3),
-    B.kappa = matrix(c(inlaParameters$lkappa0, 0, -1), 1,3),
+    B.kappa = matrix(c(inlaParameters$lkappa0, 0, -1), 1, 3),
     theta.prior.mean = c(0,0), theta.prior.prec = c(1/control$loghyperparaSDinMyModel^2, 1/control$loghyperparaSDinMyModel^2))
 
-  timeVecTest <- predTimeVecNumeric - min(predTimeVecNumeric) + 1
+  timeVecTest <- predTimeVecNumeric - min(timeVecNumeric) + 1
   combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrix, timeVecTraining = timeVecTraining, coordinatesMatrixTest = predCoordinatesMatrix, timeVecTest = timeVecTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVecTraining = responseVec, covariateMatrixTraining = covariateMatrix, covariateMatrixTest = predCovariateMatrix, spdeObj = spde, control = control)
 
   formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1"))
@@ -283,28 +283,59 @@ analysePredResults <- function(folderForSimResults, patternForFilename, simulate
   lapply(predStatsByMethod, getStatsByMethod)
 }
 
-analyseParaEsts <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining, realFEs, realHyperpars) {
+analyseParaEsts <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining, realFEs) {
   patternForExtractingNumber <- "[:digit:]+(?=\\.rds)"
   filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
   filesIndices <- as.numeric(stringr::str_extract(filesToImport, pattern = patternForExtractingNumber))
   filesToImportInOrder <- filesToImport[order(filesIndices)]
-  computePredStats <- function(filename, realFEs, realHyperpars) {
+  computeFEerrorsAndSDs <- function(filename) {
     datasetIndex <- as.numeric(stringr::str_extract(filename, pattern = patternForExtractingNumber))
     simResults <- readRDS(filename)
-    lapply(simResults, function(modelResult) {
-      c(absDiff = hhh)
+    methodNames <- names(simResults)
+    names(methodNames) <- methodNames
+    lapply(methodNames, function(methodName) {
+      FEandSD <- getFEmeansAndSDs(simResults[[methodName]]$fittedModel)
+      commonNames <- intersect(names(realFEs), rownames(FEandSD))
+      reorderedFEandSD <- FEandSD[commonNames, ]
+      absError <- abs(realFEs[commonNames] - reorderedFEandSD$Mean)
+      SDs <- reorderedFEandSD$SD
+      data.frame(absError = absError, SD = SDs)
     })
   }
-  predStatsByDataset <- lapply(filesToImportInOrder, computePredStats, obsIndicesForTraining = obsIndicesForTraining, simulatedDataList = simulatedDataList)
+  FEerrorsAndSDsByDataset <- lapply(filesToImportInOrder, FUN = computeFEerrorsAndSDs)
+  methodNames <- names(FEerrorsAndSDsByDataset[[1]])
+  names(methodNames) <- methodNames
+  meanFEerrorsByMethod <- lapply(methodNames, function(methodName) {
+    FEerrorsAcrossDataset <- sapply(seq_along(FEerrorsAndSDsByDataset), function(datasetIndex) {
+      FEerrorsAndSDsByDataset[[datasetIndex]][[methodName]]$absError
+    })
+    meanResult <- rowMeans(FEerrorsAcrossDataset)
+    names(meanResult) <- rownames(FEerrorsAndSDsByDataset[[1]][[methodName]])
+    meanResult
+  })
+  meanFEsdsByMethod <- lapply(methodNames, function(methodName) {
+    FEsdsByDataset <- sapply(seq_along(FEerrorsAndSDsByDataset), function(datasetIndex) {
+      FEerrorsAndSDsByDataset[[datasetIndex]][[methodName]]$SD
+    })
+    meanResult <- rowMeans(FEsdsByDataset)
+    names(meanResult) <- rownames(FEerrorsAndSDsByDataset[[1]][[methodName]])
+    meanResult
+  })
+
+  AbsErrorAndSDbyMethod <- lapply(methodNames, function(methodName) {
+    data.frame(AbsError = meanFEerrorsByMethod[[methodName]], EstSD = meanFEsdsByMethod[[methodName]])
+  })
+  AbsErrorAndSDbyMethod
 }
 
 getFEmeansAndSDs <- function(outputObject) {
   output <- NULL
   if ("INLAMRA" %in% class(outputObject)) {
     output <- outputObject$FEmarginalMoments[ , c("Mean", "StdDev")]
-  } else if ("inla" %in% class(outputObject)) {
+  } else if (!is.null(outputObject$summary.fixed)) {
     output <- outputObject$summary.fixed[, c("mean", "sd")]
   }
+  colnames(output) <- c("Mean", "SD")
   output
 }
 
@@ -496,4 +527,41 @@ produceINLAparameters <- function(control) {
   lkappa0 <- log(8 * spatialSmoothness)/2 - log(range0)
   ltau0 <- 0.5*log(gamma(spatialSmoothness)/(gamma(control$alpha)*(4*pi)^(control$d/2))) - log(control$sigma0) - spatialSmoothness * lkappa0
   list(spatialSmoothness = spatialSmoothness, lkappa0 = lkappa0, ltau0 = ltau0, range0 = range0)
+}
+
+fitNewModel <- function(
+  folderForSimulationResults,
+  patternForFilename = "Dataset",
+  responseMatrix,
+  covariateMatrix,
+  coordinatesMatrix,
+  timeVecNumeric,
+  funToFitNewModel = fitSPDE,
+  newModelName = NULL,
+  controlForNewModel,
+  numThreads,
+  obsIndicesForTraining) {
+  if (is.null(newModelName)) {
+    stop("Please input a name for the new model (argument newModelName)! \n")
+  }
+  filenames <- list.files(path = folderForSimulationResults, pattern = patternForFilename, full.names = TRUE)
+  fitNewModel <- function(filename) {
+    dataIndex <- as.numeric(stringr::str_extract(filename, pattern = "[:digit:]+(?=\\.rds)"))
+    responseVecForTraining <- responseMatrix[obsIndicesForTraining, dataIndex]
+    covariateMatrixForTraining <- covariateMatrix[obsIndicesForTraining, ]
+    coordinatesMatrixForTraining <- coordinatesMatrix[obsIndicesForTraining, ]
+    timeVecNumericForTraining <- timeVecNumeric[obsIndicesForTraining]
+    predCoordinatesMatrix <- coordinatesMatrix[!obsIndicesForTraining, ]
+    predCovariateMatrix <- covariateMatrix[!obsIndicesForTraining, ]
+    predTimeVecNumeric <- timeVecNumeric[!obsIndicesForTraining]
+
+    listResult <- funToFitNewModel(responseVec = responseVecForTraining, covariateMatrix = covariateMatrixForTraining, coordinatesMatrix = coordinatesMatrixForTraining, predCovariateMatrix = predCovariateMatrix, predCoordinatesMatrix = predCoordinatesMatrix, timeVecNumeric = timeVecNumericForTraining, predTimeVecNumeric = predTimeVecNumeric, numThreads = numThreads, control = controlForNewModel)
+    oldResult <- readRDS(filename)
+    oldResult[[newModelName]] <- listResult
+    saveRDS(oldResult, filename)
+    cat("Added", newModelName, "fit in", filename, "\n")
+    invisible(NULL)
+  }
+  lapply(filenames, refitSPDE)
+  invisible(NULL)
 }
