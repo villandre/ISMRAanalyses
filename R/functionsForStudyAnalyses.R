@@ -278,7 +278,7 @@ analysePredResults <- function(folderForSimResults, patternForFilename, simulate
     sapply(predStatsByDataset, "[[", methodName)
   })
   getStatsByMethod <- function(resultMatrix) {
-    t(apply(resultMatrix, 1, function(rowValues) c(Mean = mean(rowValues), SD = sd(rowValues), Minimum = min(rowValues), Maximum = max(rowValues), Median = median(rowValues))))
+    t(apply(resultMatrix, 1, function(rowValues) c(Mean = mean(rowValues), SD = sd(rowValues), Median = median(rowValues), Minimum = min(rowValues), Maximum = max(rowValues))))
   }
   lapply(predStatsByMethod, getStatsByMethod)
 }
