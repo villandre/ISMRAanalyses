@@ -21,8 +21,8 @@ if ("package:ISMRAanalyses" %in% search()) {
 library(ISMRAanalyses)
 library(sp)
 
-# setwd("/home/luc/INLAMRAfiles/INLAMRApaper1/simulations")
-setwd("/home/luc/ISMRAfiles/")
+setwd("/home/luc/INLAMRAfiles/INLAMRApaper1/simulations")
+# setwd("/home/luc/ISMRAfiles/")
 ```
 The simulated data are based on satellite imagery data obtained in Maharashtra. We first define a rectangular zone in the longitude-latitude projection. Since MODIS data are in the sinusoidal projection, we project the zone we just defined in that coordinate system.
 ```{r, eval=FALSE}
@@ -81,7 +81,7 @@ set.seed(10)
 numReplicates <- 1000
 fieldValuesWithError <- replicate(n = 1000, expr = as.numeric(choleskyDecomp %*% rnorm(nrow(covarStruct))))
 ```
-We then add fixed effects to the field values, yielding the data we are going to model using the methods we selected for the simulation study.
+We then add fixed effects to the field values, yielding the data we are going to model using the methods we selected for the simulation study. We start by inputting parameter values.
 ```{r, eval=FALSE}
 landCoverEffects <- c(
   Water = 0,
@@ -111,15 +111,19 @@ timeEffects <- c(
 elevationEffect <- -0.001
 interceptValue <- 40 # This is arbitrary. It should not affect the analyses.
 
+referenceTimepoint <- "May27"
+referenceTimepointIndex <- match(referenceTimepoint, names(timeEffects))
+fixedEffectsVec <- c(Intercept = interceptValue, landCoverEffects[-referenceLandCoverIndex], elevation = elevationEffect, timeEffects[-referenceTimepointIndex])
+```
+
+We now create the covariate matrix and add covariate effects to the previously-simulated responses.
+```{r, eval=FALSE}
 landCoverFactor <- factor(covariateData@data$landCover, levels = 0:14, labels = names(landCoverEffects))
 timepointsFactor <- factor(timepoints, levels = unique(timepoints), labels = names(timeEffects))
 
-referenceTimepoint <- "May27"
-referenceTimepointIndex <- match(referenceTimepoint, names(timeEffects))
-
 covariateMatrix <- cbind(model.matrix(object = ~ landCover, data = data.frame(landCover = landCoverFactor)), elevation = covariateData@data$elevation, model.matrix(object = ~ time, data = data.frame(time = timepointsFactor))[ , -1]) # We remove the intercept, which has already been created for land cover. Ocean and May 27 are reference categories.
 colnames(covariateMatrix) <- replace(colnames(covariateMatrix), which(colnames(covariateMatrix) == "(Intercept)"), "Intercept")
-fixedEffectsVec <- c(Intercept = interceptValue, landCoverEffects[-referenceLandCoverIndex], elevation = elevationEffect, timeEffects[-referenceTimepointIndex])
+
 colnames(covariateMatrix) <- gsub(pattern = "landCover", replacement = "", x = colnames(covariateMatrix))
 colnames(covariateMatrix) <- gsub(pattern = "time", replacement = "", x = colnames(covariateMatrix))
 
@@ -142,7 +146,7 @@ simulatedDatasetsList <- list(
 
 saveRDS(simulatedDatasetsList, file = "data/dataForSimulations.rds", compress = TRUE)
 ```
-As a sanity check, we can plot one of the simulated datasets.
+As a sanity check, we plot one of the simulated datasets.
 ```{r, eval=FALSE}
 numRasterRows <- numRasterCols <- 48 # Approximate, hard to recover because data were collected in the sinusoidal projection, which does not translate to a perfectly-spaced grid of coordinates in the longitude/latitude projection.
 observationsToPlot <- which(simulatedDatasetsList$time == "May28")
@@ -221,7 +225,62 @@ obsIndicesForTraining <-
       (simulatedDatasetsList$coords$latitude <= latitudeQuantiles[[2]]) &
       (simulatedDatasetsList$coords$latitude >= latitudeQuantiles[[1]]))
 
-recomputePredictionsForSimOutputs(folderForSimResults = "outputFiles/", patternForFilename = "Dataset.+\\.rds$", coordinatesMatrixTraining = as.matrix(simulatedDatasetsList$coords)[obsIndicesForTraining, ], coordinatesMatrixTest = as.matrix(simulatedDatasetsList$coords)[!obsIndicesForTraining, ], timeVecNumericTraining = simulatedDatasetsList$timeNumeric[obsIndicesForTraining], timeVecNumericTest = simulatedDatasetsList$timeNumeric[!obsIndicesForTraining], covariateMatrixTraining = simulatedDatasetsList$covariates[obsIndicesForTraining, ], covariateMatrixTest = simulatedDatasetsList$covariates[!obsIndicesForTraining, ], responseMatrixTraining = simulatedDatasetsList$responses[obsIndicesForTraining, ], controlForSPDE = do.call("create.SPDE.control", list(mesh.2d.max.n = c(100, 100), mesh.2d.offset = c(5,5))))
+# recomputePredictionsForSimOutputs(folderForSimResults = "outputFiles/", patternForFilename = "Dataset.+\\.rds$", coordinatesMatrixTraining = as.matrix(simulatedDatasetsList$coords)[obsIndicesForTraining, ], coordinatesMatrixTest = as.matrix(simulatedDatasetsList$coords)[!obsIndicesForTraining, ], timeVecNumericTraining = simulatedDatasetsList$timeNumeric[obsIndicesForTraining], timeVecNumericTest = simulatedDatasetsList$timeNumeric[!obsIndicesForTraining], covariateMatrixTraining = simulatedDatasetsList$covariates[obsIndicesForTraining, ], covariateMatrixTest = simulatedDatasetsList$covariates[!obsIndicesForTraining, ], responseMatrixTraining = simulatedDatasetsList$responses[obsIndicesForTraining, ], controlForSPDE = do.call("create.SPDE.control", list(mesh.2d.max.n = c(100, 100), mesh.2d.offset = c(5,5))))
+stripSPDEobjects(folderForSimulationResults = "outputFiles/", patternForFilename = "Dataset")
+refitSPDE(
+  folderForSimulationResults = "outputFiles/",
+  patternForFilename = "Dataset[[:digit:]]+\\.rds$",
+  responseMatrix = simulatedDatasetsList$responses,
+  covariateMatrix = simulatedDatasetsList$covariates,
+  coordinatesMatrix = as.matrix(simulatedDatasetsList$coords),
+  timeVecNumeric = simulatedDatasetsList$timeNumeric,
+  funToFitSPDE = fitSPDE,
+  controlForSPDE = list(mesh.2d.max.n = c(100, 100),
+                        mesh.2d.offset = c(10, 10)
+                        ),
+  numThreads = 4,
+  obsIndicesForTraining = obsIndicesForTraining)
+```
+We now obtain summaries for prediction accuracy across all simulations for both IS-MRA and SPDE.
+```{r}
+realFEvalues <- fixedEffectsVec[colnames(simulatedDatasetsList$covariates)]
+predictionSummariesByMethod <- analysePredResults(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining)
+mergedTables <- do.call("rbind", predictionSummariesByMethod)
+xtable::xtable(mergedTables, digits = 3)
+FEerrorsAndSDsByMethod <- analyseParaEsts(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, realFEs = realFEvalues)
+lapply(FEerrorsAndSDsByMethod, xtable::xtable, digits = 3)
+```
+In order to reduce the memory footprint, the INLAMRA function does not return the full conditional precision matrix by default. However, in order to show its structure, we can make it return it.
+```{r}
+ISMRAsampleResultWithQmatrix <- MRAinla::INLAMRA(
+  responseVec = simulatedDatasetsList$responses[obsIndicesForTraining, 1],
+  spatialCoordMat = simulatedDatasetsList$coords[obsIndicesForTraining, ],
+  predSpatialCoordMat = simulatedDatasetsList$coords[!obsIndicesForTraining, ],
+  covariateFrame = as.data.frame(simulatedDatasetsList$covariates[obsIndicesForTraining, ]),
+  predCovariateFrame = as.data.frame(simulatedDatasetsList$covariates[!obsIndicesForTraining, ]),
+  timePOSIXorNumericVec = simulatedDatasetsList$timeNumeric[obsIndicesForTraining],
+  predTimePOSIXorNumericVec = simulatedDatasetsList$timeNumeric[!obsIndicesForTraining],
+  spatialRangeList = list(log(4), c(log(4), 1)),
+  spatialSmoothnessList = list(log(1.5)),
+  timeRangeList = list(log(2), c(log(2), 1)),
+  timeSmoothnessList = list(log(0.5)),
+  scaleList = list(log(3), c(log(3), 1)),
+  errorSDlist = list(log(0.5)),
+  fixedEffSDlist = list(log(2)),
+  control = list(
+    Mlon = 2,
+    Mlat = 2,
+    Mtime = 0,
+    numKnotsRes0 = 20,
+    numIterOptim = 20,
+    tipKnotsThinningRate = 1,
+    numValuesForIS = 50,
+    returnQmat = TRUE,
+    numOpenMPthreads = 4))
+library(Matrix)
+jpeg("outputFiles/QmatrixExample.jpg", width = 1200, height = 1200)
+image(ISMRAsampleResultWithQmatrix$Qmat)
+dev.off()
 ```
 
 

@@ -496,7 +496,7 @@ refitSPDE <- function(
   numThreads,
   obsIndicesForTraining) {
   filenames <- list.files(path = folderForSimulationResults, pattern = patternForFilename, full.names = TRUE)
-  refitSPDE <- function(filename) {
+  refitSPDEinner <- function(filename) {
     dataIndex <- as.numeric(stringr::str_extract(filename, pattern = "[:digit:]+(?=\\.rds)"))
     responseVecForTraining <- responseMatrix[obsIndicesForTraining, dataIndex]
     covariateMatrixForTraining <- covariateMatrix[obsIndicesForTraining, ]
@@ -513,7 +513,7 @@ refitSPDE <- function(
     cat("Updated SPDE fit in", filename, "\n")
     invisible(NULL)
   }
-  lapply(filenames, refitSPDE)
+  lapply(filenames, refitSPDEinner)
   invisible(NULL)
 }
 
@@ -564,4 +564,72 @@ fitNewModel <- function(
   }
   lapply(filenames, refitSPDE)
   invisible(NULL)
+}
+
+prepareDataForISMRA <- function(temperatures, elevations, landCover, satelliteNamesVec, collectionDatesPOSIX, completeDateVector = collectionDatesPOSIX) {
+  if ("RasterLayer" %in% class(temperatures[[1]])) {
+    temperaturePoints <- lapply(temperatures, FUN = raster::rasterToPoints, spatial = TRUE)
+  } else {
+    temperaturePoints <- temperatures
+  }
+
+  satelliteNamesList <- lapply(seq_along(satelliteNamesVec), function(dayIndex) {
+    rep(satelliteNamesVec[[dayIndex]], nrow(temperaturePoints[[dayIndex]]@coords))
+  })
+  satellite <- do.call("c", satelliteNamesList)
+  satellite <- as.numeric(factor(x = satellite, levels = c("Terra", "Aqua"))) - 1
+  numTimePoints <- length(completeDateVector)
+
+  timeValues <- do.call("c", lapply(seq_along(collectionDatesPOSIX), function(x) rep(collectionDatesPOSIX[[x]], length(temperaturePoints[[x]]))))
+
+  timeLevels <- as.numeric(factor(as.character(timeValues), levels = as.character(completeDateVector))) - 1
+
+  timeModelMatrix <- t(sapply(timeLevels, function(x) {
+    unitVector <- rep(0, numTimePoints - 1)
+    unitVector[x] <- 1 # When x takes value 0, the vector remains all 0s, which is what we want.
+    unitVector
+  }))
+  colnames(timeModelMatrix) <- paste("time", 2:numTimePoints, sep = "")
+
+  landCoverPoints <- lapply(temperaturePoints, function(tempPoints) {
+    tempPointsReproj <- sp::spTransform(tempPoints, crs(landCover))
+    landCoverAtPoints <- raster::extract(landCover, tempPointsReproj)
+    landCoverValues <- sort(unique(landCoverAtPoints))
+    columnNames <- paste("landCover", landCoverValues, sep = "")
+    landCoverMatrix <- t(sapply(landCoverAtPoints, function(x) {
+      unitVec <- numeric(length(columnNames))
+      unitVec[match(x, landCoverValues)] <- 1
+      unitVec
+    }))
+    colnames(landCoverMatrix) <- columnNames
+    sp::SpatialPointsDataFrame(coords = tempPoints@coords, data = as.data.frame(landCoverMatrix), proj4string = raster::crs(tempPoints))
+  })
+  landCoverPoints <- uniformiseLandCover(landCoverPoints)
+
+  elevationPoints <- lapply(temperaturePoints, function(tempPoints) {
+    tempPoints <- sp::spTransform(tempPoints, crs(elevations[[1]]))
+    elevationValues <- rep(0, length(tempPoints))
+    lapply(elevations, function(elevationRaster) {
+      extractedValues <- raster::extract(elevationRaster, tempPoints)
+      elevationValues[!is.na(extractedValues)] <<- extractedValues[!is.na(extractedValues)]
+      NULL
+    })
+    sp::SpatialPointsDataFrame(coords = tempPoints@coords, data = data.frame(elevation = elevationValues), proj4string = crs(tempPoints))
+  })
+
+  latitudePoints <- lapply(temperaturePoints, function(x) {
+    sp::SpatialPointsDataFrame(x@coords, data = data.frame(latitude = x@coords[, 2]), proj4string = raster::crs(x))
+  })
+  combinedData <- do.call("cbind", lapply(list(landCoverPoints, latitudePoints, elevationPoints), function(x) do.call("rbind", lapply(x, function(y) y@data))))
+  combinedData <- cbind(combinedData, timeModelMatrix, Aqua = satellite)
+  if ("RasterLayer" %in% class(temperatures[[1]])) {
+    combinedData <- cbind(do.call("rbind", lapply(temperaturePoints, function(y) y@data)), combinedData)
+    colnames(combinedData)[[1]] <- "y"
+  }
+
+  coordinates <- do.call("rbind", lapply(temperaturePoints, function(x) x@coords))
+  rownames(coordinates) <- as.character(1:nrow(coordinates))
+  missingLandCoverOrElevation <- (rowSums(combinedData[ , grep(colnames(combinedData), pattern = "landCover", value = TRUE)]) == 0) | is.na(combinedData[, "elevation"])
+
+  spacetime::STIDF(sp = SpatialPoints(coordinates[!missingLandCoverOrElevation, ], proj4string = crs(temperaturePoints[[1]])), time = timeValues[!missingLandCoverOrElevation], data = as.data.frame(combinedData[!missingLandCoverOrElevation,]))
 }

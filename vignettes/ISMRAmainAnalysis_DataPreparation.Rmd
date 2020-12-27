@@ -1,0 +1,84 @@
+---
+title: "Main analysis with validation"
+author: "Luc Villandre"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+We start by simulating data. 
+```{r setup}
+if ("package:ISMRAanalyses" %in% search()) {
+  detach("package:ISMRAanalyses", unload = TRUE)
+}
+library(ISMRAanalyses)
+library(sp)
+```
+The simulated data are based on satellite imagery data obtained in Maharashtra. We first define a rectangular zone in the longitude-latitude projection. Since MODIS data are in the sinusoidal projection, we project the zone we just defined in that coordinate system.
+```{r, eval=FALSE}
+MaharashtraPolygonEdges <- rbind(c(21, 72.76), c(21, 76.5), c(17.0, 76.5), c(17.0, 72.6), c(21, 72.6))
+MaharashtraPolygonEdges <- MaharashtraPolygonEdges[ , 2:1]
+MaharashtraPolygon <- sp::SpatialPolygons(Srl = list(sp::Polygons(list(sp::Polygon(coords = MaharashtraPolygonEdges)), ID = "Mumbai")))
+raster::crs(MaharashtraPolygon) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+MaharashtraPolygonOtherCRS <- sp::spTransform(MaharashtraPolygon, CRSobj = sp::CRS("+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +R=6371007.181 +units=m +no_defs"))
+```
+We then import land cover and elevation values from the MODIS and ASTER data files we obtained from EarthData. Those files are too voluminous to be stored with the package. A shell script has been included in the vignette `ISMRA_DownloadingEarthDataFiles` to obtain all the raw data files.
+```{r, eval=FALSE}
+folderForEarthDataFiles <- "/store/luc/rawDataFiles/"
+landCoverFiles <- list.files(folderForEarthDataFiles, pattern = "MCD*", full.names = TRUE)
+landCoverRasterSinusoidal <- produceLandCover(landCoverFiles, regionPolygon = MaharashtraPolygonOtherCRS)
+elevationFiles <- list.files(path = folderForEarthDataFiles, pattern = "*dem.tif", full.names = TRUE)
+elevationRasterList <- lapply(elevationFiles, raster::raster)
+```
+We then import the temperature data. On each day, we extract either the Aqua or Terra satellite data, depending on which has fewer missing values. Files downloaded from MODIS follow the following naming convention: nnnnnnn.Ayyyyddd.h00v00.vvv.yyyydddhhmmss, with
+1. nnnnnnn: Product name,
+2. Ayyyyddd: Sampling date, year (yyyy), then day (ddd), between 1 and 365,
+3. h00v00: Grid tile identifier (see [https://lpdaac.usgs.gov/dataset_discovery/modis])
+4. vvv: Data version,
+5. yyyydddhhmmss: Date data were processed, year, day, hour, minute, second.
+Days are numbered `1` to `366`, to accommodate for leap years. Note that day 121 corresponds to April 30. The range 25 to 31 identifies the period May 25 to May 31.
+```{r, eval=FALSE}
+dayOffset <- 121 
+dayRange <- 25:31 
+collectionDates <- paste("May", dayRange, "_2012", sep = "")
+collectionDatesPOSIX <- as.POSIXct(paste("2012-05-", dayRange, sep = ""))
+splitTemperaturesBySatellite <- lapply(c(Terra = "MOD11A1.A2012", Aqua = "MYD11A1.A2012"), FUN = listSDStoImport, rawDataFilesLocation = folderForEarthDataFiles, dayOffset = dayOffset, dayRange = dayRange, collectionDates = collectionDates)
+indiaTemperaturesAndTimes <- lapply(seq_along(splitTemperaturesBySatellite$Aqua), FUN = funToGetDailyRastersAndSatelliteName, splitTemperaturesBySatellite = splitTemperaturesBySatellite, MaharashtraPolygonOtherCRS = MaharashtraPolygonOtherCRS)
+indiaTemperatures <- lapply(indiaTemperaturesAndTimes, function(x) x$temperatureRaster)
+names(indiaTemperatures) <- as.character(collectionDatesPOSIX)
+```
+Now, we convert the imported data into a format more suitable for analysis. The test data in the main analysis consist of all missing temperatures on May 28th (excluding oceanic tiles).
+```{r, eval=FALSE}
+satellitePerDay <- sapply(indiaTemperaturesAndTimes, function(x) x$satellite)
+trainingDataMay25toMay31 <- prepareDataForISMRA(landCover = landCoverRasterSinusoidal, elevations = elevationRasterList, temperatures = indiaTemperatures, collectionDatesPOSIX = collectionDatesPOSIX, satelliteNamesVec = satellitePerDay)
+
+testDataMay28 <- produceTestData(indiaTemperatures = indiaTemperatures, boundaryPolygon = MaharashtraPolygonOtherCRS, dayIndex = length(indiaTemperatures) - 3, satelliteNamesVec = satellitePerDay[[4]], landCover = landCoverRasterSinusoidal, elevation = elevationRasterList, collectionDatesPOSIX = collectionDatesPOSIX)
+
+# landCover = 0 (water) will be the reference category.
+
+trainingDataMay25toMay31@data <- subset(trainingDataMay25toMay31@data, select = -landCover0)
+if ("landCover0" %in% colnames(testDataMay28@data)) {
+  testDataMay28@data <- subset(testDataMay28@data, select = -landCover0)
+}
+
+testDataMay28@data <- subset(testDataMay28@data, select = -y)
+
+# We very lightly jitter the training data...
+
+set.seed(10)
+trainingDataMay25toMay31@sp@coords <- geoR::jitter2d(trainingDataMay25toMay31@sp@coords, max = 0.00001)
+```
+Finally, we save the data for the analyses.
+```{r, eval=FALSE}
+saveRDS(trainingDataMay25toMay31, file = "data/trainingDataMainAnalysisMay25toMay31.rds", compress = TRUE)
+saveRDS(testDataMay28, file = "data/testDataMainAnalysisMay28.rds", compress = TRUE)
+```

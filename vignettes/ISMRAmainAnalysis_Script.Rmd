@@ -1,0 +1,123 @@
+---
+title: "Vignette Title"
+author: "Vignette Author"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+We start by loading a number of packages and limiting parallelisation by using functions in RhpcBLASctl. Depending on one's system's configuration, the latter step might not be essential.
+```{r, eval=FALSE}
+library(sp)
+library(raster)
+library(rgdal)
+library(rgeos)
+library(spacetime)
+library(MRAinla)
+library(RhpcBLASctl)
+library(ISMRAanalyses)
+
+blas_set_num_threads(1)
+omp_set_num_threads(1)
+```
+We then reset the working directory and load
+```{r, eval=FALSE}
+setwd("/home/luc/INLAMRAfiles/INLAMRApaper1/realData")
+mainData <- data(trainingDataMainAnalysisMay25toMay31)
+predData <- data(testDataMainAnalysisMay28)
+```
+The data are expressed in the sinusoidal projection, the native projection for MODIS data. We switch to the longitude-latitude projection, as it creates maps that are easier to visualise. 
+```{r, eval=FALSE}
+mainData@sp <- spTransform(x = mainData@sp, CRSobj = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+predData@sp <- spTransform(x = predData@sp, CRSobj = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+```
+The data do not include enough latitude variation to make it worth adjusting for, and we remove the covariate.
+```{r, eval=FALSE}
+mainData@data <- subset(mainData@data, select = -latitude)
+predData@data <- subset(predData@data, select = -latitude)
+```
+Centering continuous covariates, such as elevation, is strongly recommended. This is why we run the following lines: 
+```{r, eval=FALSE}
+mainDataMeanElevation <- mean(mainData@data$elevation)
+mainData@data$elevation <- mainData@data$elevation - mainDataMeanElevation
+predData@data$elevation <- predData@data$elevation - mainDataMeanElevation
+```
+We now define many starting values for hyperparameters expressed on the logarithmic scale. The fixed uncorrelated variation standard deviation, `errorSD`, is fixed at $0.5$, based on https://landval.gsfc.nasa.gov/Results.php?TitleID=mod11_valsup10. The variable `hyperNormalList` gives the values for the mean and standard deviation parameters for the normal hyperpriors.
+```{r, eval=FALSE}
+hyperStart <- list(
+  space = c(rho = 0),
+  time = c(rho = 0),
+  scale = 0)
+
+errorSD <- 0.5 
+fixedEffSD <- 10
+
+fixedHyperValues <- list(
+  space = c(smoothness = log(1.5)),
+  time = c(smoothness = log(0.5)),
+  errorSD = log(errorSD),
+  fixedEffSD = log(fixedEffSD)
+)
+
+logHyperpriorSD <- 2
+
+hyperNormalList <- list(
+  space = list(
+    smoothness = c(mu = fixedHyperValues$space[["smoothness"]], sigma = logHyperpriorSD),
+    rho = c(mu = hyperStart$space[["rho"]], sigma = logHyperpriorSD)),
+  time = list(
+    smoothness = c(mu = fixedHyperValues$time[["smoothness"]], sigma = logHyperpriorSD),
+    rho = c(mu = hyperStart$time[["rho"]], sigma = logHyperpriorSD)),
+  scale = c(mu = hyperStart$scale, sigma = logHyperpriorSD * 2), # Prior should be more vague, see Lindgren INLA tutorial p. 12
+  errorSD = c(mu = fixedHyperValues$errorSD , sigma = logHyperpriorSD),
+  fixedEffSD = c(mu = fixedHyperValues$fixedEffSD, sigma = logHyperpriorSD)
+)
+```
+We can now run the analyses. Note that it can take up to several days and requires at least 20 GB of memory. The lines for control parameters `fileToSaveOptOutput` and `folderToSaveISpoints` should be commented out if intermediate results, allowing the user to stop and resume the fitting process, are not required. Given the time necessary to obtain the results, we do recommend keeping them in.
+```{r, eval=FALSE}
+indiaAnalysis <- INLAMRA(
+  responseVec = mainData@data[ , "y"],
+  covariateFrame = subset(mainData@data, select = -y), 
+  spatialCoordMat = mainData@sp@coords,
+  timePOSIXorNumericVec = time(mainData),
+  predCovariateFrame = predData@data,
+  predSpatialCoordMat = predData@sp@coords,
+  predTimePOSIXorNumericVec = time(predData),
+  spatialRangeList = list(start = hyperStart$space[["rho"]], hyperpars = hyperNormalList$space$rho),
+  spatialSmoothnessList = list(start = fixedHyperValues$space[["smoothness"]]),
+  timeRangeList = list(start = hyperStart$time[["rho"]], hyperpars = hyperNormalList$time$rho),
+  timeSmoothnessList = list(start = fixedHyperValues$time[["smoothness"]]),
+  scaleList = list(start = hyperStart$scale, hyperpars = hyperNormalList$scale),
+  errorSDlist = list(start = fixedHyperValues$errorSD),
+  fixedEffSDlist = list(start = fixedHyperValues$fixedEffSD),
+  control = list(
+    Mlon = 6,
+    Mlat = 5,
+    Mtime = 1,
+    numKnotsRes0 = 8,
+    numIterOptim = 20,
+    numOpenMPthreads = 12L,
+    fileToSaveOptOutput = "outputFiles/optimOutputMay28evenLarger.Rdata",  
+    folderToSaveISpoints = "outputFiles/ISpointsMay28evenLarger",
+    tipKnotsThinningRate = 1/3,
+    spaceJitterMax = 0, 
+    timeJitterMaxInDecimalDays = 0 
+  )
+)
+```
+
+Results are saved in subdirectory `outputFiles`. The user should ensure that it exists, or change the file argument.
+```{r, eval=FALSE}
+saveRDS(indiaAnalysis, file = "outputFiles/ISMRA_mainAnalysis.rds", compress = TRUE)
+```
+
