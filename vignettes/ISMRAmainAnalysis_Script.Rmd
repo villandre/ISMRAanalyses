@@ -1,6 +1,6 @@
 ---
-title: "Vignette Title"
-author: "Vignette Author"
+title: "Main analysis script"
+author: "Luc Villandre"
 date: "`r Sys.Date()`"
 output: rmarkdown::html_vignette
 vignette: >
@@ -33,24 +33,24 @@ omp_set_num_threads(1)
 We then reset the working directory and load
 ```{r, eval=FALSE}
 setwd("/home/luc/INLAMRAfiles/INLAMRApaper1/realData")
-mainData <- data(trainingDataMainAnalysisMay25toMay31)
-predData <- data(testDataMainAnalysisMay28)
+data(trainingDataMainAnalysisMay25toMay31)
+data(testDataMainAnalysisMay28)
 ```
 The data are expressed in the sinusoidal projection, the native projection for MODIS data. We switch to the longitude-latitude projection, as it creates maps that are easier to visualise. 
 ```{r, eval=FALSE}
-mainData@sp <- spTransform(x = mainData@sp, CRSobj = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
-predData@sp <- spTransform(x = predData@sp, CRSobj = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+trainingDataMainAnalysisMay25toMay31@sp <- spTransform(x = trainingDataMainAnalysisMay25toMay31@sp, CRSobj = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+testDataMainAnalysisMay28@sp <- spTransform(x = testDataMainAnalysisMay28@sp, CRSobj = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
 ```
 The data do not include enough latitude variation to make it worth adjusting for, and we remove the covariate.
 ```{r, eval=FALSE}
-mainData@data <- subset(mainData@data, select = -latitude)
-predData@data <- subset(predData@data, select = -latitude)
+trainingDataMainAnalysisMay25toMay31@data <- subset(trainingDataMainAnalysisMay25toMay31@data, select = -latitude)
+testDataMainAnalysisMay28@data <- subset(testDataMainAnalysisMay28@data, select = -latitude)
 ```
 Centering continuous covariates, such as elevation, is strongly recommended. This is why we run the following lines: 
 ```{r, eval=FALSE}
-mainDataMeanElevation <- mean(mainData@data$elevation)
-mainData@data$elevation <- mainData@data$elevation - mainDataMeanElevation
-predData@data$elevation <- predData@data$elevation - mainDataMeanElevation
+trainingDataMainAnalysisMay25toMay31MeanElevation <- mean(trainingDataMainAnalysisMay25toMay31@data$elevation)
+trainingDataMainAnalysisMay25toMay31@data$elevation <- trainingDataMainAnalysisMay25toMay31@data$elevation - trainingDataMainAnalysisMay25toMay31MeanElevation
+testDataMainAnalysisMay28@data$elevation <- testDataMainAnalysisMay28@data$elevation - trainingDataMainAnalysisMay25toMay31MeanElevation
 ```
 We now define many starting values for hyperparameters expressed on the logarithmic scale. The fixed uncorrelated variation standard deviation, `errorSD`, is fixed at $0.5$, based on https://landval.gsfc.nasa.gov/Results.php?TitleID=mod11_valsup10. The variable `hyperNormalList` gives the values for the mean and standard deviation parameters for the normal hyperpriors.
 ```{r, eval=FALSE}
@@ -86,13 +86,13 @@ hyperNormalList <- list(
 We can now run the analyses. Note that it can take up to several days and requires at least 20 GB of memory. The lines for control parameters `fileToSaveOptOutput` and `folderToSaveISpoints` should be commented out if intermediate results, allowing the user to stop and resume the fitting process, are not required. Given the time necessary to obtain the results, we do recommend keeping them in.
 ```{r, eval=FALSE}
 indiaAnalysis <- INLAMRA(
-  responseVec = mainData@data[ , "y"],
-  covariateFrame = subset(mainData@data, select = -y), 
-  spatialCoordMat = mainData@sp@coords,
-  timePOSIXorNumericVec = time(mainData),
-  predCovariateFrame = predData@data,
-  predSpatialCoordMat = predData@sp@coords,
-  predTimePOSIXorNumericVec = time(predData),
+  responseVec = trainingDataMainAnalysisMay25toMay31@data[ , "y"],
+  covariateFrame = subset(trainingDataMainAnalysisMay25toMay31@data, select = -y), 
+  spatialCoordMat = trainingDataMainAnalysisMay25toMay31@sp@coords,
+  timePOSIXorNumericVec = time(trainingDataMainAnalysisMay25toMay31),
+  predCovariateFrame = testDataMainAnalysisMay28@data,
+  predSpatialCoordMat = testDataMainAnalysisMay28@sp@coords,
+  predTimePOSIXorNumericVec = time(testDataMainAnalysisMay28),
   spatialRangeList = list(start = hyperStart$space[["rho"]], hyperpars = hyperNormalList$space$rho),
   spatialSmoothnessList = list(start = fixedHyperValues$space[["smoothness"]]),
   timeRangeList = list(start = hyperStart$time[["rho"]], hyperpars = hyperNormalList$time$rho),
@@ -107,8 +107,8 @@ indiaAnalysis <- INLAMRA(
     numKnotsRes0 = 8,
     numIterOptim = 20,
     numOpenMPthreads = 12L,
-    fileToSaveOptOutput = "outputFiles/optimOutputMay28evenLarger.Rdata",  
-    folderToSaveISpoints = "outputFiles/ISpointsMay28evenLarger",
+    fileToSaveOptOutput = "outputFiles/optimOutput.Rdata",  
+    folderToSaveISpoints = "outputFiles/ISpoints",
     tipKnotsThinningRate = 1/3,
     spaceJitterMax = 0, 
     timeJitterMaxInDecimalDays = 0 

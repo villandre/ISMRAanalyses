@@ -15,13 +15,14 @@ knitr::opts_chunk$set(
   comment = "#>"
 )
 ```
-We start by simulating data. 
+We start by loading required libraries
 ```{r setup}
 if ("package:ISMRAanalyses" %in% search()) {
   detach("package:ISMRAanalyses", unload = TRUE)
 }
 library(ISMRAanalyses)
 library(sp)
+setwd("/home/luc/ISMRAanalyses")
 ```
 The simulated data are based on satellite imagery data obtained in Maharashtra. We first define a rectangular zone in the longitude-latitude projection. Since MODIS data are in the sinusoidal projection, we project the zone we just defined in that coordinate system.
 ```{r, eval=FALSE}
@@ -79,6 +80,6 @@ trainingDataMay25toMay31@sp@coords <- geoR::jitter2d(trainingDataMay25toMay31@sp
 ```
 Finally, we save the data for the analyses.
 ```{r, eval=FALSE}
-saveRDS(trainingDataMay25toMay31, file = "data/trainingDataMainAnalysisMay25toMay31.rds", compress = TRUE)
-saveRDS(testDataMay28, file = "data/testDataMainAnalysisMay28.rds", compress = TRUE)
+save(trainingDataMay25toMay31, file = "data/trainingDataMainAnalysisMay25toMay31.Rdata", compress = TRUE)
+save(testDataMay28, file = "data/testDataMainAnalysisMay28.Rdata", compress = TRUE)
 ```
