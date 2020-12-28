@@ -22,7 +22,7 @@ if ("package:ISMRAanalyses" %in% search()) {
 }
 library(ISMRAanalyses)
 library(sp)
-setwd("/home/luc/ISMRAanalyses")
+setwd("~/INLAMRAfiles/INLAMRApaper1/realData/")
 ```
 The simulated data are based on satellite imagery data obtained in Maharashtra. We first define a rectangular zone in the longitude-latitude projection. Since MODIS data are in the sinusoidal projection, we project the zone we just defined in that coordinate system.
 ```{r, eval=FALSE}

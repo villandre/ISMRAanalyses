@@ -1,3 +1,56 @@
+listSDStoImport <- function(searchString, rawDataFilesLocation, dayOffset, dayRange, collectionDates) {
+  temperatureFiles <- list.files(path = rawDataFilesLocation, pattern = searchString, full.names = TRUE)
+  subFiles <- sapply(paste("A2012", dayOffset + dayRange, sep = ""), grep, x = temperatureFiles, value = TRUE)
+  temperatures <- lapply(subFiles, MODIS::getSds)
+  splitTemperatures <- split(temperatures, f = factor(substr(subFiles, start = 0, stop = gregexpr(pattern = ".h2", text = subFiles[[1]])[[1]] - 1)))
+  names(splitTemperatures) <- collectionDates
+  splitTemperatures
+}
+
+funToCreateRaster <- function(temperatureSdsList, polygonBound) {
+  extractionFun <- function(x) {
+    tempGrid <- rgdal::readGDAL(x$SDS4gdal[1], as.is = TRUE)
+    hourGrid <- rgdal::readGDAL(x$SDS4gdal[3], as.is = TRUE)
+    tempGrid$band1 <- tempGrid$band1 * 0.02 - 273.15 # See https://gis.stackexchange.com/questions/72524/how-do-i-convert-the-lst-values-on-the-modis-lst-image-to-degree-celsius
+    # There's a 0.02 scaling factor applied to values in file to get the temperatures.
+    # The -273.15 brings temperatures back in Celsius
+    hourGrid@data[,1] <- hourGrid@data[,1] * 0.1
+
+    list(temperatureRaster = raster::raster(tempGrid), hourRaster = raster::raster(hourGrid))
+  }
+  tempAndTimeRasters <- lapply(temperatureSdsList, extractionFun)
+
+  createRaster <- function(rasterName) {
+    rasterList <- lapply(tempAndTimeRasters, function(x) x[[rasterName]])
+    mergedRasters <- do.call(raster::merge, rasterList)
+    smallerRaster <- raster::crop(x = mergedRasters, y = polygonBound)
+    spObject <- raster::rasterToPoints(smallerRaster, spatial = TRUE)
+    polygonValuesIndex <- sp::over(x = spObject, y = polygonBound)
+    pointsInPolygon <- subset(spObject, subset = !is.na(polygonValuesIndex))
+    raster::values(smallerRaster) <- rep(NA, raster::ncell(smallerRaster))
+    if (sum(!is.na(polygonValuesIndex)) == 0) {
+      return(smallerRaster)
+    }
+    raster::rasterize(x = pointsInPolygon, y = smallerRaster, field = "layer")
+  }
+  rasterNames <- c("temperatureRaster", "hourRaster")
+  tempAndTime <- lapply(rasterNames, FUN = createRaster)
+  names(tempAndTime) <- rasterNames
+  tempAndTime
+}
+
+funToGetDailyRastersAndSatelliteName <- function(var1, splitTemperaturesBySatellite, MaharashtraPolygonOtherCRS) {
+  aquaRasters <- funToCreateRaster(splitTemperaturesBySatellite$Aqua[[var1]], polygonBound = MaharashtraPolygonOtherCRS)
+  terraRasters <- funToCreateRaster(splitTemperaturesBySatellite$Terra[[var1]], polygonBound = MaharashtraPolygonOtherCRS)
+  if (sum(!is.na(raster::values(aquaRasters$temperatureRaster))) >= sum(!is.na(raster::values(terraRasters$temperatureRaster)))) {
+    cat("Returning Aqua!\n")
+    c(aquaRasters, satellite = "Aqua")
+  } else {
+    cat("Returning Terra!\n")
+    c(terraRasters, satellite = "Terra")
+  }
+}
+
 uniformiseLandCover <- function(landCoverPointsList) {
   landCovers <- do.call("c", lapply(landCoverPointsList, function(x) colnames(x@data)))
   uniqueLandCovers <- unique(landCovers)
@@ -592,7 +645,7 @@ prepareDataForISMRA <- function(temperatures, elevations, landCover, satelliteNa
   colnames(timeModelMatrix) <- paste("time", 2:numTimePoints, sep = "")
 
   landCoverPoints <- lapply(temperaturePoints, function(tempPoints) {
-    tempPointsReproj <- sp::spTransform(tempPoints, crs(landCover))
+    tempPointsReproj <- sp::spTransform(tempPoints, raster::crs(landCover))
     landCoverAtPoints <- raster::extract(landCover, tempPointsReproj)
     landCoverValues <- sort(unique(landCoverAtPoints))
     columnNames <- paste("landCover", landCoverValues, sep = "")
@@ -607,14 +660,14 @@ prepareDataForISMRA <- function(temperatures, elevations, landCover, satelliteNa
   landCoverPoints <- uniformiseLandCover(landCoverPoints)
 
   elevationPoints <- lapply(temperaturePoints, function(tempPoints) {
-    tempPoints <- sp::spTransform(tempPoints, crs(elevations[[1]]))
+    tempPoints <- sp::spTransform(tempPoints, raster::crs(elevations[[1]]))
     elevationValues <- rep(0, length(tempPoints))
     lapply(elevations, function(elevationRaster) {
       extractedValues <- raster::extract(elevationRaster, tempPoints)
       elevationValues[!is.na(extractedValues)] <<- extractedValues[!is.na(extractedValues)]
       NULL
     })
-    sp::SpatialPointsDataFrame(coords = tempPoints@coords, data = data.frame(elevation = elevationValues), proj4string = crs(tempPoints))
+    sp::SpatialPointsDataFrame(coords = tempPoints@coords, data = data.frame(elevation = elevationValues), proj4string = raster::crs(tempPoints))
   })
 
   latitudePoints <- lapply(temperaturePoints, function(x) {
@@ -631,5 +684,25 @@ prepareDataForISMRA <- function(temperatures, elevations, landCover, satelliteNa
   rownames(coordinates) <- as.character(1:nrow(coordinates))
   missingLandCoverOrElevation <- (rowSums(combinedData[ , grep(colnames(combinedData), pattern = "landCover", value = TRUE)]) == 0) | is.na(combinedData[, "elevation"])
 
-  spacetime::STIDF(sp = SpatialPoints(coordinates[!missingLandCoverOrElevation, ], proj4string = crs(temperaturePoints[[1]])), time = timeValues[!missingLandCoverOrElevation], data = as.data.frame(combinedData[!missingLandCoverOrElevation,]))
+  spacetime::STIDF(sp = sp::SpatialPoints(coordinates[!missingLandCoverOrElevation, ], proj4string = raster::crs(temperaturePoints[[1]])), time = timeValues[!missingLandCoverOrElevation], data = as.data.frame(combinedData[!missingLandCoverOrElevation,]))
+}
+
+produceTestData <- function(indiaTemperatures, landCover, elevation, collectionDatesPOSIX, boundaryPolygon, satelliteNamesVec, dayIndex) {
+  day28raster <- indiaTemperatures[[dayIndex]]
+  raster::values(day28raster) <- replace(raster::values(day28raster), is.na(raster::values(day28raster)), -50)
+  rasterCellsMidpoints <- raster::rasterToPoints(day28raster, spatial = TRUE)
+  indiaValuesIndex <- sp::over(x = rasterCellsMidpoints, y = boundaryPolygon)
+  pointsInIndia <- subset(rasterCellsMidpoints, subset = !is.na(indiaValuesIndex))
+  missingIndianValueIndices <- pointsInIndia@data$layer == -50
+  missingPoints <- subset(pointsInIndia, subset = missingIndianValueIndices)
+
+  landCoverInMissingZones <- raster::extract(x = landCover, y = missingPoints)
+  missingPointsNoWaterNoNA <- missingPoints[which(!is.na(landCoverInMissingZones) & !(landCoverInMissingZones == 0)), ]
+
+  emptyRaster <- day28raster
+  raster::values(emptyRaster) <- rep(NA, raster::ncell(emptyRaster))
+  missingRaster <- raster::rasterize(x = missingPointsNoWaterNoNA, y = emptyRaster, field = "layer")
+
+  testDataMay28 <- prepareDataForISMRA(landCover = landCover, elevations = elevation, temperatures = list(missingRaster), collectionDatesPOSIX = collectionDatesPOSIX[length(collectionDatesPOSIX) - 3], satelliteNamesVec = satelliteNamesVec, completeDateVector = collectionDatesPOSIX)
+  testDataMay28
 }
