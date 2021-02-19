@@ -148,12 +148,12 @@ saveRDS(simulatedDatasetsList, file = "data/dataForSimulations.rds", compress = 
 ```
 As a sanity check, we plot one of the simulated datasets.
 ```{r, eval=FALSE}
-numRasterRows <- numRasterCols <- 48 # Approximate, hard to recover because data were collected in the sinusoidal projection, which does not translate to a perfectly-spaced grid of coordinates in the longitude/latitude projection.
+numRasterRows <- numRasterCols <- 45 # Approximate, hard to recover because data were collected in the sinusoidal projection, which does not translate to a perfectly-spaced grid of coordinates in the longitude/latitude projection.
 observationsToPlot <- which(simulatedDatasetsList$time == "May28")
 fields::quilt.plot(
-  x = simulatedDatasetsList$coords[ , "x"][observationsToPlot],
-  y = simulatedDatasetsList$coords[ , "y"][observationsToPlot],
-  z = simulatedDatasetsList$responses[observationsToPlot],
+  x = simulatedDatasetsList$coords[ , "longitude"][observationsToPlot],
+  y = simulatedDatasetsList$coords[ , "latitude"][observationsToPlot],
+  z = simulatedDatasetsList$responses[observationsToPlot, 1],
   nx = numRasterRows, ny = numRasterCols)
 ```
 We now begin the simulations per se.
@@ -193,11 +193,9 @@ fittedModelsByDataset <- lapply(
   funToFitSPDE = fitSPDE,
   funToFitVecchia = fitVecchia,
   funToFitISMRA = fitISMRA,
-  dataCovarianceMatrix = NULL,
   numThreads = 4,
   controlForSPDE = list(mesh.2d.max.n = c(100, 100),
-                        mesh.2d.offset = c(5,5)
-                        ),
+                        mesh.2d.offset = c(5,5)),
   controlForISMRA = list(control = list(
     Mlon = 2,
     Mlat = 2,
@@ -242,16 +240,16 @@ refitSPDE(
   obsIndicesForTraining = obsIndicesForTraining)
 ```
 We now obtain summaries for prediction accuracy across all simulations for both IS-MRA and SPDE.
-```{r}
+```{r, eval = FALSE}
 realFEvalues <- fixedEffectsVec[colnames(simulatedDatasetsList$covariates)]
-predictionSummariesByMethod <- analysePredResults(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining)
+predictionSummariesByMethod <- analysePredResults(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, shiftISMRApostPredVars = -errorSD^2)
 mergedTables <- do.call("rbind", predictionSummariesByMethod)
 xtable::xtable(mergedTables, digits = 3)
 FEerrorsAndSDsByMethod <- analyseParaEsts(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, realFEs = realFEvalues)
 lapply(FEerrorsAndSDsByMethod, xtable::xtable, digits = 3)
 ```
 In order to reduce the memory footprint, the INLAMRA function does not return the full conditional precision matrix by default. However, in order to show its structure, we can make it return it.
-```{r}
+```{r, eval=FALSE}
 ISMRAsampleResultWithQmatrix <- MRAinla::INLAMRA(
   responseVec = simulatedDatasetsList$responses[obsIndicesForTraining, 1],
   spatialCoordMat = simulatedDatasetsList$coords[obsIndicesForTraining, ],
@@ -282,5 +280,40 @@ jpeg("outputFiles/QmatrixExample.jpg", width = 1200, height = 1200)
 image(ISMRAsampleResultWithQmatrix$Qmat)
 dev.off()
 ```
-
+In the following outputs, we have the posterior predictive distribution for INLA based on fitted values, which should also reflect the contribution from the uncorrelated error term.
+```{r, eval=F}
+controlForSPDE <- list(mesh.2d.max.n = c(100, 100),
+                        mesh.2d.offset = c(5,5),
+                        useFittedValues = TRUE)
+updatedSimResults <- recomputePredictionsForSimOutputs(
+  folderForSimResults = "outputFiles/",
+  patternForFilename = "Dataset.+\\.rds$",
+  coordinatesMatrixTraining = as.matrix(simulatedDatasetsList$coords[obsIndicesForTraining, ]),
+  coordinatesMatrixTest = as.matrix(simulatedDatasetsList$coords[!obsIndicesForTraining, ]),
+  timeVecNumericTraining = as.numeric(simulatedDatasetsList$time[obsIndicesForTraining]),
+  timeVecNumericTest = as.numeric(simulatedDatasetsList$time[!obsIndicesForTraining]),
+  covariateMatrixTraining = as.matrix(simulatedDatasetsList$covariates[obsIndicesForTraining, ]),  
+  covariateMatrixTest = as.matrix(simulatedDatasetsList$covariates[!obsIndicesForTraining, ]),
+  responseMatrixTraining = simulatedDatasetsList$responses[obsIndicesForTraining, ],
+  saveResult = FALSE,
+  controlForSPDE = controlForSPDE)
+```
+We produce a plotted example of the training data.
+```{r, eval=F}
+numRasterRows <- 45
+numRasterCols <- 44 # Approximate, hard to recover because data were collected in the sinusoidal projection, which does not translate to a perfectly-spaced grid of coordinates in the longitude/latitude projection.
+  boundaries <- c(min(simulatedDatasetsList$responses[ , 1]) - 1e-300, max(simulatedDatasetsList$responses[ , 1]) + 1e-300)
+  colourBreaks <- round(seq(from = boundaries[[1]], to = boundaries[[2]], length.out = 8), digits = 2)
+jpeg("outputFiles/sampleSimulatedDataset.jpeg", width = 1000, height = 1000, units = "px")
+layout(mat = matrix(c(1, 3, 2, 4), 2, 2))
+for (dayToPlot in c("May27", "May28", "May29")) {
+  observationsToPlot <- intersect(which(simulatedDatasetsList$time == dayToPlot), which(obsIndicesForTraining))
+  rasterToPlot <- raster::raster(nrows=numRasterRows, ncols=numRasterCols, xmn=min(simulatedDatasetsList$coords$longitude) - 0.0001, xmx=max(simulatedDatasetsList$coords$longitude) + 0.0001, ymn=min(simulatedDatasetsList$coords$latitude) - 0.0001, ymx=max(simulatedDatasetsList$coords$latitude) + 0.0001)
+  rasterToPlot <- raster::rasterize(x = sp::SpatialPoints(coords = simulatedDatasetsList$coords[observationsToPlot, ]), y = rasterToPlot, field = simulatedDatasetsList$responses[observationsToPlot, 1])
+  ecol <- mapmisc::colourScale(x = raster::values(rasterToPlot), breaks = 9, col = "Spectral")
+  ecol$col <- rev(ecol$col)
+  raster::plot(rasterToPlot, col = ecol$col, breaks = colourBreaks, legend = TRUE)
+}
+dev.off()
+```
 

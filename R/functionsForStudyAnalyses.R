@@ -110,9 +110,12 @@ prepareCovariateDataForISMRA <- function(elevationsRasterListWGS, landCoverRaste
   spacetime::STIDF(sp = sp::SpatialPoints(coordinatesExtended, proj4string = raster::crs(elevationsRasterListWGS[[1]])), time = timeValuesExtended, data = as.data.frame(combinedDataExtended))
 }
 
+# SPDEresult$misc$configs$config[[1]]$Q to access the Q matrix.
 fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNumeric, predCoordinatesMatrix, predCovariateMatrix, predTimeVecNumeric, numThreads = 1, control = list()) {
   control <- do.call("create.SPDE.control", control)
-
+  coordinatesPoints <- sp::SpatialPoints(coords = coordinatesMatrix, proj4string = sp::CRS("+proj=longlat +datum=WGS84"))
+  newCoordinatesPoints <- sp::spTransform(coordinatesPoints, CRSobj = sp::CRS("+proj=utm +zone=43 +datum=WGS84 +units=km"))
+  coordinatesMatrix <- newCoordinatesPoints@coords
   timeVecTraining <- timeVecNumeric - min(timeVecNumeric) + 1
   spaceAndTimeMesh <- buildSpaceAndTimeMesh(coordinatesMatrixTraining = coordinatesMatrix, timeVecNumericTraining = timeVecTraining, control = control)
 
@@ -125,6 +128,8 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
 
   timeVecTest <- predTimeVecNumeric - min(timeVecNumeric) + 1
   combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrix, timeVecTraining = timeVecTraining, coordinatesMatrixTest = predCoordinatesMatrix, timeVecTest = timeVecTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVecTraining = responseVec, covariateMatrixTraining = covariateMatrix, covariateMatrixTest = predCovariateMatrix, spdeObj = spde, control = control)
+  prior.prec <- list(initial = 2, prior = "normal", param = c(2, 1), fixed = TRUE)
+  control.family.value <- list(hyper = list(prec = prior.prec))
 
   formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1"))
 
@@ -133,6 +138,8 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
       formulaForSPDE,
       data = INLA::inla.stack.data(combinedStack),
       control.predictor = list(compute = TRUE, A = INLA::inla.stack.A(combinedStack)),
+      # control.family = control.family.value, # Comment in to fix the precision for the error term.
+      control.compute = list(config = TRUE, q = TRUE),
       num.threads = numThreads), error = function(e) e, finally = "Error in fitting SPDE! Return list will contain NAs.\n")
   returnResult <- predsAndSDs <- NULL
   if (!("simpleError" %in% class(SPDEresult))) {
@@ -159,8 +166,9 @@ create.SPDE.control <- function(
   alpha = 2,
   kappa = 1,
   loghyperparaSDinMyModel = log(10),
-  sigma0 = 1) {  # = 1/(range parameter in my model))
-  list(mesh.2d.cutoff = mesh.2d.cutoff, mesh.2d.offset = mesh.2d.offset, mesh.2d.max.n = mesh.2d.max.n, d = d, alpha = alpha, kappa = kappa, loghyperparaSDinMyModel = loghyperparaSDinMyModel, sigma0 = sigma0)
+  sigma0 = 1,
+  useFittedValues = FALSE) {  # = 1/(range parameter in my model))
+  list(mesh.2d.cutoff = mesh.2d.cutoff, mesh.2d.offset = mesh.2d.offset, mesh.2d.max.n = mesh.2d.max.n, d = d, alpha = alpha, kappa = kappa, loghyperparaSDinMyModel = loghyperparaSDinMyModel, sigma0 = sigma0, useFittedValues = useFittedValues)
 }
 
 fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, covariateMatrix, predCovariateMatrix, timeVecNumeric, predTimeVecNumeric, numThreads = 1, control) {
@@ -178,7 +186,7 @@ fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, cova
     fixedEffSD = c(mu = control$fixedHyperValues$fixedEffSD, sigma = control$logHyperpriorSD)
   )
 
-  ISMRAfit <- tryCatch(expr = MRAINLA::INLAMRA(
+  ISMRAfit <- tryCatch(expr = MRAinla::INLAMRA(
     responseVec = responseVec,
     covariateFrame = as.data.frame(covariateMatrix),
     spatialCoordMat = as.matrix(coordinatesMatrix),
@@ -194,7 +202,7 @@ fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, cova
     errorSDlist = list(start = control$fixedHyperValues$errorSD),
     fixedEffSDlist = list(start = control$fixedHyperValues$fixedEffSD),
     control = control$control
-  ), error = function(e) e, finally = cat("ISMRA analysis failed! Return list will contain NAs.\n"))
+  ), error = function(e) e)
   returnResult <- NULL
   if (!("simpleError" %in% class(ISMRAfit))) {
   returnResult <- list(
@@ -270,8 +278,9 @@ fitModels <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNu
 
   controlAndFunToFitList <- list(
     # Vecchia = list(funToFit = fitVecchia, control = controlForVecchia),
-    ISMRA = list(funToFit = fitISMRA, control = controlForISMRA),
-    SPDE = list(funToFit = fitSPDE, control = controlForSPDE))
+    SPDE = list(funToFit = fitSPDE, control = controlForSPDE),
+    ISMRA = list(funToFit = fitISMRA, control = controlForISMRA))
+
   lapply(
     X = controlAndFunToFitList,
     FUN = function(listElement) listElement$funToFit(responseVec = responseVecForTraining, covariateMatrix = covariateMatrixForTraining, coordinatesMatrix = coordinatesMatrixForTraining, predCovariateMatrix = predCovariateMatrix, predCoordinatesMatrix = predCoordinatesMatrix, timeVecNumeric = timeVecNumericForTraining, predTimeVecNumeric = predTimeVecNumeric, numThreads = numThreads, control = listElement$control))
@@ -310,7 +319,7 @@ simulationFun <- function(datasetIndex, responseMatrix, covariateMatrix, coordin
   invisible(returnResult)
 }
 
-analysePredResults <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining) {
+analysePredResults <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining, shiftISMRApostPredVars = 0) {
   patternForExtractingNumber <- "[:digit:]+(?=\\.rds)"
   filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
   filesIndices <- as.numeric(stringr::str_extract(filesToImport, pattern = patternForExtractingNumber))
@@ -320,8 +329,15 @@ analysePredResults <- function(folderForSimResults, patternForFilename, simulate
     datasetIndex <- as.numeric(stringr::str_extract(filename, pattern = patternForExtractingNumber))
     simResults <- readRDS(filename)
     realValues <- simulatedDataList$responses[!obsIndicesForTraining, datasetIndex]
-    lapply(simResults, function(modelResult) {
-      c(MSPE = mean((modelResult$predictionMeans - realValues)^2), MedSPE = median((modelResult$predictionMeans - realValues)^2), MeanSD = mean(modelResult$predictionSDs), MedSD = median(modelResult$predictionSDs))
+    modelNames <- names(simResults)
+    names(modelNames) <- modelNames
+    lapply(modelNames, function(modelName) {
+      modelResult <- simResults[[modelName]]
+      predictionSDs <- modelResult$predictionSDs
+      if (modelName == "ISMRA") {
+        predictionSDs <- modelResult$predictionSDs + shiftISMRApostPredVars
+      }
+      c(MSPE = mean((modelResult$predictionMeans - realValues)^2), MedSPE = median((modelResult$predictionMeans - realValues)^2), MeanSD = mean(predictionSDs), MedSD = median(predictionSDs))
     })
   }
   predStatsByDataset <- lapply(filesToImportInOrder, computePredStats, obsIndicesForTraining = obsIndicesForTraining, simulatedDataList = simulatedDataList)
@@ -408,8 +424,10 @@ getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVecTraining, 
     theta.prior.mean = c(0,0), theta.prior.prec = c(1/control$loghyperparaSDinMyModel^2, 1/control$loghyperparaSDinMyModel^2))
 
   combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrixTraining, timeVecTraining = timeVecNumericTraining, coordinatesMatrixTest = coordinatesMatrixTest, timeVecTest = timeVecNumericTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVecTraining = responseVecTraining, covariateMatrixTraining = covariateMatrixTraining, covariateMatrixTest = covariateMatrixTest, spdeObj = spde, control = control)
-
   preds <- INLAoutput$summary.linear.predictor
+  if (control$useFittedValues) {
+    preds <- INLAoutput$summary.fitted.values
+  }
   stackIndex <- INLA::inla.stack.index(combinedStack, "predictions")$data
   preds[stackIndex, c("mean", "sd")]
 }
@@ -480,6 +498,10 @@ buildInlaStack <- function(coordinatesMatrixTraining, timeVecTraining, coordinat
 
 getPredictionsAndSDsFromINLAoutputAlt <- function(INLAoutput, inlaStack, control) {
   preds <- INLAoutput$summary.linear.predictor
+  if (control$useFittedValues) {
+    preds <- INLAoutput$summary.fitted.values
+  }
+
   stackIndex <- INLA::inla.stack.index(inlaStack, "predictions")$data
   preds[stackIndex, c("mean", "sd")]
 }
@@ -488,7 +510,7 @@ getPredictionsAndSDsFromINLAoutputAlt <- function(INLAoutput, inlaStack, control
 # which were missing due to a bug.
 # The new version of the software should not require this function.
 
-recomputePredictionsForSimOutputs <- function(folderForSimResults, patternForFilename = "Dataset.+\\.rds$", coordinatesMatrixTraining, coordinatesMatrixTest, timeVecNumericTraining, timeVecNumericTest, covariateMatrixTraining, covariateMatrixTest, responseMatrixTraining, controlForSPDE) {
+recomputePredictionsForSimOutputs <- function(folderForSimResults, patternForFilename = "Dataset.+\\.rds$", coordinatesMatrixTraining, coordinatesMatrixTest, timeVecNumericTraining, timeVecNumericTest, covariateMatrixTraining, covariateMatrixTest, responseMatrixTraining, saveResult = FALSE, controlForSPDE) {
   filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
 
   fixFunction <- function(filename, responseMatrixTraining, covariateMatrixTraining, covariateMatrixTest, timeVecNumericTraining, timeVecNumericTest, coordinatesMatrixTraining, coordinatesMatrixTest) {
@@ -515,9 +537,12 @@ recomputePredictionsForSimOutputs <- function(folderForSimResults, patternForFil
       predictionMeans = ISMRApredsAndSDs$Mean,
       predictionSDs = ISMRApredsAndSDs$SD)
     simResultsUpdate <- list(SPDE = updatedSimResultsSPDE, ISMRA = updatedSimResultsISMRA)
-    saveRDS(simResultsUpdate, file = filename, compress = TRUE)
-    cat("Updated predictions in ", filename, "\n")
-    invisible(NULL)
+    if (saveResult) {
+      saveRDS(simResultsUpdate, file = filename, compress = TRUE)
+      cat("Updated predictions in ", filename, "\n")
+      return(invisible(NULL))
+    }
+    simResultsUpdate
   }
   lapply(filesToImport, fixFunction , responseMatrixTraining = responseMatrixTraining, covariateMatrixTraining = covariateMatrixTraining,  timeVecNumericTraining = timeVecNumericTraining, covariateMatrixTest = covariateMatrixTest, timeVecNumericTest = timeVecNumericTest, coordinatesMatrixTraining = coordinatesMatrixTraining, coordinatesMatrixTest = coordinatesMatrixTest)
 }
@@ -706,3 +731,5 @@ produceTestData <- function(indiaTemperatures, landCover, elevation, collectionD
   testDataMay28 <- prepareDataForISMRA(landCover = landCover, elevations = elevation, temperatures = list(missingRaster), collectionDatesPOSIX = collectionDatesPOSIX[length(collectionDatesPOSIX) - 3], satelliteNamesVec = satelliteNamesVec, completeDateVector = collectionDatesPOSIX)
   testDataMay28
 }
+
+

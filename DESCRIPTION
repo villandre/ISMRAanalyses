@@ -8,6 +8,8 @@ Description: Meant to help reproduce the analyses in the IS-MRA study (Villandre
 License: Not meant to be widely distributed
 Encoding: UTF-8
 LazyData: true
+Imports:
+    raster (>= 2.6-7), spacetime (>= 1.2-2), sp (>= 1.4-4), geoR (>= 1.8-1), rgdal (>= 1.5-23), INLA (>= 20.03.17), MRAinla (>= 0.1.0), geosphere (>= 1.5-10)
 Suggests: 
     knitr,
     rmarkdown
