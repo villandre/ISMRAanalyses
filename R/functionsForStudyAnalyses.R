@@ -112,10 +112,12 @@ prepareCovariateDataForISMRA <- function(elevationsRasterListWGS, landCoverRaste
 
 # SPDEresult$misc$configs$config[[1]]$Q to access the Q matrix.
 fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNumeric, predCoordinatesMatrix, predCovariateMatrix, predTimeVecNumeric, numThreads = 1, control = list()) {
-  control <- do.call("create.SPDE.control", control)
   coordinatesPoints <- sp::SpatialPoints(coords = coordinatesMatrix, proj4string = sp::CRS("+proj=longlat +datum=WGS84"))
   newCoordinatesPoints <- sp::spTransform(coordinatesPoints, CRSobj = sp::CRS("+proj=utm +zone=43 +datum=WGS84 +units=km"))
   coordinatesMatrix <- newCoordinatesPoints@coords
+  predCoordinatesMatrixPoints <- sp::SpatialPoints(coords = predCoordinatesMatrix, proj4string = sp::CRS("+proj=longlat +datum=WGS84"))
+  newPredCoordinatesPoints <- sp::spTransform(predCoordinatesMatrixPoints, CRSobj = sp::CRS("+proj=utm +zone=43 +datum=WGS84 +units=km"))
+  predCoordinatesMatrix <- newPredCoordinatesPoints@coords
   timeVecTraining <- timeVecNumeric - min(timeVecNumeric) + 1
   spaceAndTimeMesh <- buildSpaceAndTimeMesh(coordinatesMatrixTraining = coordinatesMatrix, timeVecNumericTraining = timeVecTraining, control = control)
 
@@ -124,22 +126,29 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
     mesh = spaceAndTimeMesh$space,
     B.tau = matrix(c(inlaParameters$ltau0, -1, inlaParameters$spatialSmoothness), 1, 3),
     B.kappa = matrix(c(inlaParameters$lkappa0, 0, -1), 1, 3),
-    theta.prior.mean = c(0,0), theta.prior.prec = c(1/control$loghyperparaSDinMyModel^2, 1/control$loghyperparaSDinMyModel^2))
-
+    theta.prior.mean = c(
+      control$hyperStart$scale - log(control$sigma0),
+      control$hyperStart$space[["rho"]] + log(2) - inlaParameters$lrange0),
+    theta.prior.prec = c(1/control$logHyperpriorSDinISMRA^2, 1/control$logHyperpriorSDinISMRA^2))
   timeVecTest <- predTimeVecNumeric - min(timeVecNumeric) + 1
   combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrix, timeVecTraining = timeVecTraining, coordinatesMatrixTest = predCoordinatesMatrix, timeVecTest = timeVecTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVecTraining = responseVec, covariateMatrixTraining = covariateMatrix, covariateMatrixTest = predCovariateMatrix, spdeObj = spde, control = control)
-  prior.prec <- list(initial = 2, prior = "normal", param = c(2, 1), fixed = TRUE)
-  control.family.value <- list(hyper = list(prec = prior.prec))
+  error.prior.prec <- list(initial = 1/exp(control$fixedHyperValues$errorSD)^2, prior = "normal", param = c(2, 1), fixed = TRUE)
+  control.family.value <- list(hyper = list(prec = error.prior.prec))
+  randomValuesFromTimeRangePrior <- rnorm(10000, mean = control$hyperStart$time[["rho"]], sd = control$logHyperpriorSDinISMRA)
+  transformedValues <- log(1 + exp(-exp(randomValuesFromTimeRangePrior))) - log(1 - exp(-exp(randomValuesFromTimeRangePrior)))
+  meanForPrior <- mean(transformedValues)
+  precForPrior <- 1/var(transformedValues)
 
-  formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1"))
+  formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1", hyper = list(theta = list(prior = "normal", param = c(mean = meanForPrior, precision = precForPrior), initial = meanForPrior, fixed = FALSE))))
 
   SPDEresult <- tryCatch(
     expr = INLA::inla(
       formulaForSPDE,
       data = INLA::inla.stack.data(combinedStack),
       control.predictor = list(compute = TRUE, A = INLA::inla.stack.A(combinedStack)),
-      # control.family = control.family.value, # Comment in to fix the precision for the error term.
+      control.family = control.family.value, # Comment in to fix the precision for the error term.
       control.compute = list(config = TRUE, q = TRUE),
+      control.fixed = list(mean = 0, prec = 1/exp(control$fixedHyperValues$fixedEffSD)^2),
       num.threads = numThreads), error = function(e) e, finally = "Error in fitting SPDE! Return list will contain NAs.\n")
   returnResult <- predsAndSDs <- NULL
   if (!("simpleError" %in% class(SPDEresult))) {
@@ -161,18 +170,17 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
 create.SPDE.control <- function(
   mesh.2d.cutoff = 0.01,
   mesh.2d.offset = c(0.1, 0.2),
-  mesh.2d.max.n = 2000,
+  mesh.2d.max.n = -1,
+  mesh.2d.max.edge = 0.52,
   d = 1,
   alpha = 2,
-  kappa = 1,
-  loghyperparaSDinMyModel = log(10),
+  kappa0 = 1,
   sigma0 = 1,
   useFittedValues = FALSE) {  # = 1/(range parameter in my model))
-  list(mesh.2d.cutoff = mesh.2d.cutoff, mesh.2d.offset = mesh.2d.offset, mesh.2d.max.n = mesh.2d.max.n, d = d, alpha = alpha, kappa = kappa, loghyperparaSDinMyModel = loghyperparaSDinMyModel, sigma0 = sigma0, useFittedValues = useFittedValues)
+  list(mesh.2d.cutoff = mesh.2d.cutoff, mesh.2d.max.edge = mesh.2d.max.edge, mesh.2d.offset = mesh.2d.offset, mesh.2d.max.n = mesh.2d.max.n, d = d, alpha = alpha, kappa0 = kappa0, sigma0 = sigma0, useFittedValues = useFittedValues)
 }
 
 fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, covariateMatrix, predCovariateMatrix, timeVecNumeric, predTimeVecNumeric, numThreads = 1, control) {
-  control <- do.call("create.ISMRA.control", control)
   control$control$numOpenMPthreads <- numThreads
   hyperNormalList <- list(
     space = list(
@@ -181,7 +189,7 @@ fitISMRA <- function(responseVec, coordinatesMatrix, predCoordinatesMatrix, cova
     time = list(
       smoothness = c(mu = control$fixedHyperValues$time[["smoothness"]], sigma = control$logHyperpriorSD),
       rho = c(mu = control$hyperStart$time[["rho"]], sigma = control$logHyperpriorSD)),
-    scale = c(mu = control$hyperStart$scale, sigma = control$logHyperpriorSD * 2), # Prior should be more vague, see Lindgren INLA tutorial p. 12
+    scale = c(mu = control$hyperStart$scale, sigma = control$logHyperpriorSD),
     errorSD = c(mu = control$fixedHyperValues$errorSD , sigma = control$logHyperpriorSD),
     fixedEffSD = c(mu = control$fixedHyperValues$fixedEffSD, sigma = control$logHyperpriorSD)
   )
@@ -253,7 +261,7 @@ customCovFct <- function(locs1, locs2) {
   })
   distValues <- geosphere::distHaversine(locsValues[[1]][ , 1:2], locsValues[[2]][ , 1:2])/1000
   timeDistValues <- abs(locsValues[[1]][ , 3] - locsValues[[2]][ , 3])
-  MRAINLA::maternCov(distValues, smoothness = 1.5, rho = 1, scale = 1) * MRAINLA::maternCov(timeDistValues, smoothness = 0.5, rho = 1, scale = 1)
+  MRAinla::maternCov(distValues, smoothness = 1.5, rho = 1, scale = 1) * MRAinla::maternCov(timeDistValues, smoothness = 0.5, rho = 1, scale = 1)
 }
 
 fitVecchia <- function(responseVec, covariateMatrix, coordinatesMatrix, predCovariateMatrix, predCoordinatesMatrix, timeVecNumeric, predTimeVecNumeric) {
@@ -266,6 +274,8 @@ fitVecchia <- function(responseVec, covariateMatrix, coordinatesMatrix, predCova
 
 fitModels <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNumeric, obsIndicesForTraining, funToFitSPDE, funToFitVecchia, funToFitISMRA, controlForVecchia = list(), controlForISMRA = list(), controlForSPDE = list(), numThreads) {
   responseVecForTraining <- responseVec[obsIndicesForTraining]
+  controlForSPDE <- do.call("create.SPDE.control", controlForSPDE)
+  controlForISMRA <- do.call("create.ISMRA.control", controlForISMRA)
 
   covariateMatrixForTraining <- covariateMatrix[obsIndicesForTraining, ]
   predCovariateMatrix <- covariateMatrix[!obsIndicesForTraining, ]
@@ -275,7 +285,9 @@ fitModels <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNu
 
   timeVecNumericForTraining <- timeVecNumeric[obsIndicesForTraining]
   predTimeVecNumeric <- timeVecNumeric[!obsIndicesForTraining]
-
+  controlForSPDE$fixedHyperValues <- controlForISMRA$fixedHyperValues
+  controlForSPDE$hyperStart <- controlForISMRA$hyperStart
+  controlForSPDE$logHyperpriorSDinISMRA <- controlForISMRA$logHyperpriorSD
   controlAndFunToFitList <- list(
     # Vecchia = list(funToFit = fitVecchia, control = controlForVecchia),
     SPDE = list(funToFit = fitSPDE, control = controlForSPDE),
@@ -420,8 +432,11 @@ getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVecTraining, 
   spde <- INLA::inla.spde2.matern(
     mesh = spaceAndTimeMesh$space,
     B.tau = matrix(c(inlaParameters$ltau0, -1, inlaParameters$spatialSmoothness), 1, 3),
-    B.kappa = matrix(c(inlaParameters$lkappa0, 0, -1), 1,3),
-    theta.prior.mean = c(0,0), theta.prior.prec = c(1/control$loghyperparaSDinMyModel^2, 1/control$loghyperparaSDinMyModel^2))
+    B.kappa = matrix(c(inlaParameters$lkappa0, 0, -1), 1, 3),
+    theta.prior.mean = c(
+      control$hyperStart$scale$mean - log(control$sigma0),
+      control$hyperStart$space$range$mean + log(2) - inlaParameters$lrange0),
+    theta.prior.prec = c(1/control$logHyperpriorSDinISMRA^2, 1/1/control$logHyperpriorSDinISMRA^2))
 
   combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrixTraining, timeVecTraining = timeVecNumericTraining, coordinatesMatrixTest = coordinatesMatrixTest, timeVecTest = timeVecNumericTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVecTraining = responseVecTraining, covariateMatrixTraining = covariateMatrixTraining, covariateMatrixTest = covariateMatrixTest, spdeObj = spde, control = control)
   preds <- INLAoutput$summary.linear.predictor
@@ -439,7 +454,7 @@ buildSpaceAndTimeMesh <- function(coordinatesMatrixTraining, timeVecNumericTrain
 
   ## generate space mesh
 
-  meshSpace <- INLA::inla.mesh.2d(loc = coordinatesMatrixTraining[timeVecNumericTraining == 1, ], cutoff = control$mesh.2d.cutoff, offset = control$mesh.2d.offset, max.n = control$mesh.2d.max.n)
+  meshSpace <- INLA::inla.mesh.2d(loc = coordinatesMatrixTraining[timeVecNumericTraining == 1, ], cutoff = control$mesh.2d.cutoff, offset = control$mesh.2d.offset, max.n = control$mesh.2d.max.n, max.edge = control$mesh.2d.max.edge)
   list(time = meshTime, space = meshSpace)
 }
 
@@ -601,10 +616,10 @@ produceINLAparameters <- function(control) {
   spatialSmoothness <- control$alpha - control$d/2 # cf p.3 INLA tutorial
 
   # range0 and sigma0 seem to be the prior means...
-  range0 <- sqrt(8 * spatialSmoothness)/control$kappa # sqrt(8 * spatial smoothness) / Kappa. In my model, I use 1 as prior mean for spatial range and fix smoothness at 1.5. This means Kappa = 1.
-  lkappa0 <- log(8 * spatialSmoothness)/2 - log(range0)
-  ltau0 <- 0.5*log(gamma(spatialSmoothness)/(gamma(control$alpha)*(4*pi)^(control$d/2))) - log(control$sigma0) - spatialSmoothness * lkappa0
-  list(spatialSmoothness = spatialSmoothness, lkappa0 = lkappa0, ltau0 = ltau0, range0 = range0)
+  range0 <- sqrt(8 * spatialSmoothness)/control$kappa0
+
+  ltau0 <- 0.5 * log(gamma(spatialSmoothness)/(gamma(control$alpha)*(4*pi)^(control$d/2))) - log(control$sigma0) - spatialSmoothness * log(control$kappa0)
+  list(spatialSmoothness = spatialSmoothness, lkappa0 = log(control$kappa0), ltau0 = ltau0, lrange0 = log(range0))
 }
 
 fitNewModel <- function(
