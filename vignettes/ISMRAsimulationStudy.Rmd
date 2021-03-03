@@ -19,12 +19,13 @@ if ("package:ISMRAanalyses" %in% search()) {
   detach("package:ISMRAanalyses", unload = TRUE)
 }
 library(ISMRAanalyses)
+library(MRAinla)
 library(sp)
 
 setwd("/home/luc/INLAMRAfiles/INLAMRApaper1/simulations")
 # setwd("/home/luc/ISMRAfiles/")
 ```
-The simulated data are based on satellite imagery data obtained in Maharashtra. We first define a rectangular zone in the longitude-latitude projection. Since MODIS data are in the sinusoidal projection, we project the zone we just defined in that coordinate system.
+The simulated data are based on satellite imagery data obtained in Maharashtra. We first define a rectangular zone in the longitude-latitude projection. Since MODIS data are in the sinusoidal projection, we project the zone we just defined in that coordinate system. Warnings can be safely ignored: they result from a change in the conventions in referring to projections, cf. details in `sp::proj4string`.
 ```{r, eval=FALSE}
 MaharashtraPolygonEdges <- rbind(c(18.8, 73.2), c(18.8, 73.4), c(18.6, 73.4), c(18.6, 73.2), c(18.8, 73.2))
 MaharashtraPolygonEdges <- MaharashtraPolygonEdges[ , 2:1]
@@ -48,7 +49,7 @@ collectionDatesPOSIX <- as.POSIXct(paste("2012-05-", dayRange, sep = ""))
 covariateData <- prepareCovariateDataForISMRA(elevationRasterList, landCoverRasterSinusoidal, collectionDatesPOSIX)
 saveRDS(covariateData, file = "data/covariatesForSimulationStudy.rds", compress = TRUE)
 ```
-We are now ready to simulate $1,000$ vectors from a spatiotemporal Gaussian process.
+We are now ready to simulate $100$ vectors from a spatiotemporal Gaussian process.
 ```{r, eval=FALSE}
 timepoints <- as.numeric(time(covariateData@time))/(3600*24) # Time is in days
 
@@ -66,20 +67,20 @@ timeScale <- 1
 # Uncorrelated error
 errorSD <- 0.5
 
-covfun <- function(spacetimeObject, timepointsVec) {
-  spatialDistances <- fields::rdist(spacetimeObject@sp@coords)
-  timeDistances <- fields::rdist(timepointsVec)
-  GPvecchia::MaternFun(spatialDistances, c(spScale^2, spRange, spSmoothness)) * GPvecchia::MaternFun(timeDistances, c(timeScale^2, timeRange, timeSmoothness))
+covFunAlt <- function(spacetimeObject, timepointsVec) {
+  spatialDistances <- fields::RdistEarth(spacetimeObject@sp@coords, miles=FALSE)
+  timeDistances <- fields::rdist(timepointsVec, timepointsVec)
+  MRAinla::maternCov(d = spatialDistances, rho = spRange, smoothness = spSmoothness, scale = spScale) * MRAinla::maternCov(d = timeDistances, scale = timeScale, rho = timeRange, smoothness = timeSmoothness)
 }
 
-covarStruct <- covfun(covariateData, timepoints) + errorSD^2 * diag(nrow(covariateData@data))
+covarStruct <- covFunAlt(covariateData, timepoints) + errorSD^2 * diag(nrow(covariateData@data))
 
 choleskyDecomp <- t(chol(covarStruct))
 
 set.seed(10)
 
-numReplicates <- 1000
-fieldValuesWithError <- replicate(n = 1000, expr = as.numeric(choleskyDecomp %*% rnorm(nrow(covarStruct))))
+numReplicates <- 100
+fieldValuesWithError <- replicate(n = numReplicates, expr = as.numeric(choleskyDecomp %*% rnorm(nrow(covarStruct))))
 ```
 We then add fixed effects to the field values, yielding the data we are going to model using the methods we selected for the simulation study. We start by inputting parameter values.
 ```{r, eval=FALSE}
@@ -143,6 +144,7 @@ simulatedDatasetsList <- list(
   coords = covariateData@sp@coords,
   time = timepointsFactor,
   timeNumeric = timepoints)
+colnames(simulatedDatasetsList$coords) <- c("longitude", "latitude")
 
 saveRDS(simulatedDatasetsList, file = "data/dataForSimulations.rds", compress = TRUE)
 ```
@@ -150,16 +152,18 @@ As a sanity check, we plot one of the simulated datasets.
 ```{r, eval=FALSE}
 numRasterRows <- numRasterCols <- 45 # Approximate, hard to recover because data were collected in the sinusoidal projection, which does not translate to a perfectly-spaced grid of coordinates in the longitude/latitude projection.
 observationsToPlot <- which(simulatedDatasetsList$time == "May28")
+jpeg("outputFiles/dataExample.jpeg")
 fields::quilt.plot(
-  x = simulatedDatasetsList$coords[ , "longitude"][observationsToPlot],
-  y = simulatedDatasetsList$coords[ , "latitude"][observationsToPlot],
+  x = simulatedDatasetsList$coords[ , "x"][observationsToPlot],
+  y = simulatedDatasetsList$coords[ , "y"][observationsToPlot],
   z = simulatedDatasetsList$responses[observationsToPlot, 1],
   nx = numRasterRows, ny = numRasterCols)
+dev.off()
 ```
 We now begin the simulations per se.
 ```{r, eval=FALSE}
 simulatedDatasetsList <- readRDS("data/dataForSimulations.rds")
-colnames(simulatedDatasetsList$coords) <- c("longitude", "latitude")
+
 simulatedDatasetsList$coords <- as.data.frame(simulatedDatasetsList$coords)
 
 longitudeQuantiles <- quantile(simulatedDatasetsList$coords$longitude, probs = c(0.25, 0.75))
@@ -183,7 +187,7 @@ obsIndicesForTraining <-
 # dataCovarianceMatrix[upper.tri(dataCovarianceMatrix)] <- dataCovarianceMatrix[lower.tri(dataCovarianceMatrix)]
 
 fittedModelsByDataset <- lapply(
-  X = 1:250, # Let's start with 250 datasets...
+  X = 1:100, 
   FUN = simulationFun,
   responseMatrix = simulatedDatasetsList$responses,
   covariateMatrix = simulatedDatasetsList$covariates,
@@ -194,55 +198,28 @@ fittedModelsByDataset <- lapply(
   funToFitVecchia = fitVecchia,
   funToFitISMRA = fitISMRA,
   numThreads = 4,
-  controlForSPDE = list(mesh.2d.max.n = c(100, 100),
-                        mesh.2d.offset = c(5,5)),
+  controlForSPDE = list(
+    mesh.2d.offset = c(5,5),
+    mesh.2d.max.edge = 0.5,
+    sigma0 = 1,
+    kappa0 = sqrt(8 * 1.5)), # We assume that spatial smoothness is 1.5 and baseline range rho0 is 1, i.e. log(rho0) = 0.
   controlForISMRA = list(control = list(
-    Mlon = 2,
-    Mlat = 2,
+    Mlon = 4,
+    Mlat = 4,
     Mtime = 0,
-    numKnotsRes0 = 20,
+    numKnotsRes0 = 8,
     numIterOptim = 20,
     tipKnotsThinningRate = 1,
-    numValuesForIS = 125
+    numValuesForIS = 150,
+    returnQmat = FALSE
   )),
   saveDirectory = "outputFiles/")
 ```
-(DELETE ME ONCE CHANGE HAS BEEN PROCESSED: I'M FIXING AN ISSUE WITH OUTPUT FROM A PREVIOUS VERSION)
-```{r, eval=FALSE}
-simulatedDatasetsList <- readRDS("data/dataForSimulations.rds")
-colnames(simulatedDatasetsList$coords) <- c("longitude", "latitude")
-simulatedDatasetsList$coords <- as.data.frame(simulatedDatasetsList$coords)
 
-longitudeQuantiles <- quantile(simulatedDatasetsList$coords$longitude, probs = c(0.25, 0.75))
-latitudeQuantiles <- quantile(simulatedDatasetsList$coords$latitude, probs = c(0.25, 0.75))
-
-obsIndicesForTraining <-
-  !((simulatedDatasetsList$time == "May28") &
-      (simulatedDatasetsList$coords$longitude <= longitudeQuantiles[[2]]) &
-      (simulatedDatasetsList$coords$longitude >= longitudeQuantiles[[1]]) &
-      (simulatedDatasetsList$coords$latitude <= latitudeQuantiles[[2]]) &
-      (simulatedDatasetsList$coords$latitude >= latitudeQuantiles[[1]]))
-
-# recomputePredictionsForSimOutputs(folderForSimResults = "outputFiles/", patternForFilename = "Dataset.+\\.rds$", coordinatesMatrixTraining = as.matrix(simulatedDatasetsList$coords)[obsIndicesForTraining, ], coordinatesMatrixTest = as.matrix(simulatedDatasetsList$coords)[!obsIndicesForTraining, ], timeVecNumericTraining = simulatedDatasetsList$timeNumeric[obsIndicesForTraining], timeVecNumericTest = simulatedDatasetsList$timeNumeric[!obsIndicesForTraining], covariateMatrixTraining = simulatedDatasetsList$covariates[obsIndicesForTraining, ], covariateMatrixTest = simulatedDatasetsList$covariates[!obsIndicesForTraining, ], responseMatrixTraining = simulatedDatasetsList$responses[obsIndicesForTraining, ], controlForSPDE = do.call("create.SPDE.control", list(mesh.2d.max.n = c(100, 100), mesh.2d.offset = c(5,5))))
-stripSPDEobjects(folderForSimulationResults = "outputFiles/", patternForFilename = "Dataset")
-refitSPDE(
-  folderForSimulationResults = "outputFiles/",
-  patternForFilename = "Dataset[[:digit:]]+\\.rds$",
-  responseMatrix = simulatedDatasetsList$responses,
-  covariateMatrix = simulatedDatasetsList$covariates,
-  coordinatesMatrix = as.matrix(simulatedDatasetsList$coords),
-  timeVecNumeric = simulatedDatasetsList$timeNumeric,
-  funToFitSPDE = fitSPDE,
-  controlForSPDE = list(mesh.2d.max.n = c(100, 100),
-                        mesh.2d.offset = c(10, 10)
-                        ),
-  numThreads = 4,
-  obsIndicesForTraining = obsIndicesForTraining)
-```
 We now obtain summaries for prediction accuracy across all simulations for both IS-MRA and SPDE.
 ```{r, eval = FALSE}
 realFEvalues <- fixedEffectsVec[colnames(simulatedDatasetsList$covariates)]
-predictionSummariesByMethod <- analysePredResults(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, shiftISMRApostPredVars = -errorSD^2)
+predictionSummariesByMethod <- analysePredResults(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, shiftISMRApostPredVars = -errorSD^2) # The shiftISMRApostPredVars argument removes the effect of errorSD^2 in kriging SDs, to make them comparable to those reported by INLA.
 mergedTables <- do.call("rbind", predictionSummariesByMethod)
 xtable::xtable(mergedTables, digits = 3)
 FEerrorsAndSDsByMethod <- analyseParaEsts(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, realFEs = realFEvalues)
