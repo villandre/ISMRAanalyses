@@ -139,7 +139,7 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
   meanForPrior <- mean(transformedValues)
   precForPrior <- 1/var(transformedValues)
 
-  formulaForSPDE <- y ~ -1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1", hyper = list(theta = list(prior = "normal", param = c(mean = meanForPrior, precision = precForPrior), initial = meanForPrior, fixed = FALSE))))
+  formulaForSPDE <- y ~ 1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1", hyper = list(theta = list(prior = "normal", param = c(mean = meanForPrior, precision = precForPrior), initial = meanForPrior, fixed = FALSE))))
 
   SPDEresult <- tryCatch(
     expr = INLA::inla(
