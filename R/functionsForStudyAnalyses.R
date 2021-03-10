@@ -132,7 +132,7 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
     theta.prior.prec = c(1/control$logHyperpriorSDinISMRA^2, 1/control$logHyperpriorSDinISMRA^2))
   timeVecTest <- predTimeVecNumeric - min(timeVecNumeric) + 1
   combinedStack <- buildInlaStack(coordinatesMatrixTraining = coordinatesMatrix, timeVecTraining = timeVecTraining, coordinatesMatrixTest = predCoordinatesMatrix, timeVecTest = timeVecTest, meshForSpace = spaceAndTimeMesh$space, meshForTime = spaceAndTimeMesh$time, responseVecTraining = responseVec, covariateMatrixTraining = covariateMatrix, covariateMatrixTest = predCovariateMatrix, spdeObj = spde, control = control)
-  error.prior.prec <- list(initial = 1/exp(control$fixedHyperValues$errorSD)^2, prior = "normal", param = c(2, 1), fixed = TRUE)
+  error.prior.prec <- list(initial = 1/control$fixedHyperValues$errorSD^2, prior = "normal", fixed = TRUE)  # The precision in the Gaussian family is represented on the log-scale.
   control.family.value <- list(hyper = list(prec = error.prior.prec))
   randomValuesFromTimeRangePrior <- rnorm(10000, mean = control$hyperStart$time[["rho"]], sd = control$logHyperpriorSDinISMRA)
   transformedValues <- log(1 + exp(-exp(randomValuesFromTimeRangePrior))) - log(1 - exp(-exp(randomValuesFromTimeRangePrior)))
@@ -149,15 +149,17 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
       control.family = control.family.value, # Comment in to fix the precision for the error term.
       control.compute = list(config = TRUE, q = TRUE),
       control.fixed = list(mean = 0, prec = 1/exp(control$fixedHyperValues$fixedEffSD)^2),
+      control.inla = list(h = 0.0075),
       num.threads = numThreads), error = function(e) e, finally = "Error in fitting SPDE! Return list will contain NAs.\n")
   returnResult <- predsAndSDs <- NULL
   if (!("simpleError" %in% class(SPDEresult))) {
     predsAndSDs <- getPredictionsAndSDsFromINLAoutputAlt(INLAoutput = SPDEresult, inlaStack = combinedStack, control = control)
     SPDEresult <- SPDEresult[grep(pattern = "summary", x = names(SPDEresult), value = TRUE)] # INLA objects can be huge. We only keep the elements we need.
+    # We had to include in the vector of locations for which predictions are required two additional coordinates, one for day 1 (at the start) and the other for day 3 (at the end). The problem that else, the function to build A could not correctly identify the grouping. Some elements of SPDEresult will reflect that strategy. We will however subtract those unnecessary points from predictionMeans and predictionSDs.
     returnResult <- list(
       fittedModel = SPDEresult,
-      predictionMeans = predsAndSDs$mean,
-      predictionSDs = predsAndSDs$sd)
+      predictionMeans = predsAndSDs$mean[2:(length(predsAndSDs$mean) - 1)],
+      predictionSDs = predsAndSDs$sd[2:(length(predsAndSDs$sd) - 1)])
   } else {
     returnResult <- list(
       fittedModel = NA,
@@ -449,7 +451,8 @@ getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVecTraining, 
 
 buildSpaceAndTimeMesh <- function(coordinatesMatrixTraining, timeVecNumericTraining, control) {
 
-  knots <- seq(1, max(timeVecNumericTraining), length = max(timeVecNumericTraining))
+  # knots <- seq(1, max(timeVecNumericTraining), length = max(timeVecNumericTraining))
+  knots <- range(timeVecNumericTraining)
   meshTime <- INLA::inla.mesh.1d(loc = knots, degree = 2, boundary = "free")
 
   ## generate space mesh
@@ -460,52 +463,53 @@ buildSpaceAndTimeMesh <- function(coordinatesMatrixTraining, timeVecNumericTrain
 
 buildInlaStack <- function(coordinatesMatrixTraining, timeVecTraining, coordinatesMatrixTest, timeVecTest, meshForSpace, meshForTime, responseVecTraining, covariateMatrixTraining, covariateMatrixTest, spdeObj, control) {
   ## build the space time indices
-  STindex <- INLA::inla.spde.make.index("space", n.spde = spdeObj$n.spde, n.group = meshForTime$m)
-
-  Atraining <- INLA::inla.spde.make.A(meshForSpace, loc = coordinatesMatrixTraining, group = timeVecTraining, group.mesh = meshForTime)
-  Atest <- INLA::inla.spde.make.A(meshForSpace, loc = coordinatesMatrixTest, group = timeVecTest, group.mesh = meshForTime)
+  STindex <- INLA::inla.spde.make.index("space", n.spde = spdeObj$n.spde, n.group = length(unique(timeVecTraining)))
+  # We add a dummy coordinate to coordinatesMatrixTest to account for a bug in inla.spde.make.A, where it cannot properly account for the prediction block being concentrated on one day in the middle.
+  coordinatesMatrixTest <- rbind(coordinatesMatrixTraining[1, ], coordinatesMatrixTest, coordinatesMatrixTraining[nrow(coordinatesMatrixTraining), ])
+  timeVecTest <- c(timeVecTraining[[1]], timeVecTest, tail(timeVecTraining, n = 1)[[1]])
+  covariateMatrixTest <- rbind(covariateMatrixTraining[1, ], covariateMatrixTest, covariateMatrixTraining[nrow(covariateMatrixTraining), ])
+  Atraining <- INLA::inla.spde.make.A(meshForSpace, loc = coordinatesMatrixTraining, group = timeVecTraining)
+  Atest <- INLA::inla.spde.make.A(meshForSpace, loc = coordinatesMatrixTest, group = timeVecTest)
   covariateFrame <- as.data.frame(covariateMatrixTraining)
   predCovariateFrame <- as.data.frame(covariateMatrixTest)
 
   stackTraining <- INLA::inla.stack(
     data = list(y = responseVecTraining),
-    A = c(list(Atraining), lapply(rep(1, ncol(covariateFrame)), identity)),
+    A = c(list(Atraining), split(rep(1, ncol(covariateFrame)), 1:ncol(covariateFrame))),
     effects = list(
-      c(STindex, list(intercept = 1)),
-      list(elevation = covariateFrame$elevation),
-      list(May28 = covariateFrame$May28),
-      list(May29 = covariateFrame$May29),
-      list(EvergreenBroadleaf = covariateFrame$EvergreenBroadleaf),
-      list(MixedForest = covariateFrame$MixedForest),
-      list(ClosedShrublands = covariateFrame$ClosedShrublands),
-      list(Savannas = covariateFrame$Savannas),
-      list(Grasslands = covariateFrame$Grasslands),
-      list(PermanentWetlands = covariateFrame$PermanentWetlands),
-      list(Croplands = covariateFrame$Croplands),
-      list(Urban = covariateFrame$Urban),
-      list(CroplandNaturalMosaics = covariateFrame$CroplandNaturalMosaics),
-      list(NonVegetated = covariateFrame$NonVegetated)
-    ), tag = "est")
+      STindex,
+      elevation = covariateFrame$elevation,
+      May28 = covariateFrame$May28,
+      May29 = covariateFrame$May29,
+      EvergreenBroadleaf = covariateFrame$EvergreenBroadleaf,
+      MixedForest = covariateFrame$MixedForest,
+      ClosedShrublands = covariateFrame$ClosedShrublands,
+      Savannas = covariateFrame$Savannas,
+      Grasslands = covariateFrame$Grasslands,
+      PermanentWetlands = covariateFrame$PermanentWetlands,
+      Croplands = covariateFrame$Croplands,
+      Urban = covariateFrame$Urban,
+      CroplandNaturalMosaics = covariateFrame$CroplandNaturalMosaics,
+      NonVegetated = covariateFrame$NonVegetated), tag = "est")
 
   stackTest <- INLA::inla.stack(
     data = list(y = NA),
-    A = c(list(Atest), lapply(rep(1, ncol(predCovariateFrame)), identity)),
+    A = c(list(Atest), split(rep(1, ncol(predCovariateFrame)), f = 1:ncol(predCovariateFrame))),
     effects = list(
-      c(STindex, list(intercept = 1)),
-      list(elevation = predCovariateFrame$elevation),
-      list(May28 = predCovariateFrame$May28),
-      list(May29 = predCovariateFrame$May29),
-      list(EvergreenBroadleaf = predCovariateFrame$EvergreenBroadleaf),
-      list(MixedForest = predCovariateFrame$MixedForest),
-      list(ClosedShrublands = predCovariateFrame$ClosedShrublands),
-      list(Savannas = predCovariateFrame$Savannas),
-      list(Grasslands = predCovariateFrame$Grasslands),
-      list(PermanentWetlands = predCovariateFrame$PermanentWetlands),
-      list(Croplands = predCovariateFrame$Croplands),
-      list(Urban = predCovariateFrame$Urban),
-      list(CroplandNaturalMosaics = predCovariateFrame$CroplandNaturalMosaics),
-      list(NonVegetated = predCovariateFrame$NonVegetated)
-    ),
+      STindex,
+      elevation = predCovariateFrame$elevation,
+      May28 = predCovariateFrame$May28,
+      May29 = predCovariateFrame$May29,
+      EvergreenBroadleaf = predCovariateFrame$EvergreenBroadleaf,
+      MixedForest = predCovariateFrame$MixedForest,
+      ClosedShrublands = predCovariateFrame$ClosedShrublands,
+      Savannas = predCovariateFrame$Savannas,
+      Grasslands = predCovariateFrame$Grasslands,
+      PermanentWetlands = predCovariateFrame$PermanentWetlands,
+      Croplands = predCovariateFrame$Croplands,
+      Urban = predCovariateFrame$Urban,
+      CroplandNaturalMosaics = predCovariateFrame$CroplandNaturalMosaics,
+     NonVegetated = predCovariateFrame$NonVegetated),
     tag = 'predictions')
 
   INLA::inla.stack(stackTraining, stackTest)
