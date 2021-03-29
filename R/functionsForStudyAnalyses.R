@@ -139,7 +139,7 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
   meanForPrior <- mean(transformedValues)
   precForPrior <- 1/var(transformedValues)
 
-  formulaForSPDE <- y ~ 1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1", hyper = list(theta = list(prior = "normal", param = c(mean = meanForPrior, precision = precForPrior), initial = meanForPrior, fixed = FALSE))))
+  formulaForSPDE <- y ~ 1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + Urban + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1", hyper = list(theta = list(prior = "normal", param = c(mean = meanForPrior, precision = precForPrior), initial = meanForPrior, fixed = FALSE))))
 
   SPDEresult <- tryCatch(
     expr = INLA::inla(
@@ -292,8 +292,8 @@ fitModels <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNu
   controlForSPDE$logHyperpriorSDinISMRA <- controlForISMRA$logHyperpriorSD
   controlAndFunToFitList <- list(
     # Vecchia = list(funToFit = fitVecchia, control = controlForVecchia),
-    SPDE = list(funToFit = fitSPDE, control = controlForSPDE),
-    ISMRA = list(funToFit = fitISMRA, control = controlForISMRA))
+    ISMRA = list(funToFit = fitISMRA, control = controlForISMRA),
+    SPDE = list(funToFit = fitSPDE, control = controlForSPDE))
 
   lapply(
     X = controlAndFunToFitList,
@@ -333,7 +333,7 @@ simulationFun <- function(datasetIndex, responseMatrix, covariateMatrix, coordin
   invisible(returnResult)
 }
 
-analysePredResults <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining, shiftISMRApostPredVars = 0) {
+analysePredResults <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining, shiftISMRApostPredSDs = 0) {
   patternForExtractingNumber <- "[:digit:]+(?=\\.rds)"
   filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
   filesIndices <- as.numeric(stringr::str_extract(filesToImport, pattern = patternForExtractingNumber))
@@ -349,77 +349,174 @@ analysePredResults <- function(folderForSimResults, patternForFilename, simulate
       modelResult <- simResults[[modelName]]
       predictionSDs <- modelResult$predictionSDs
       if (modelName == "ISMRA") {
-        predictionSDs <- modelResult$predictionSDs + shiftISMRApostPredVars
+        predictionSDs <- modelResult$predictionSDs + shiftISMRApostPredSDs
       }
-      c(MSPE = mean((modelResult$predictionMeans - realValues)^2), MedSPE = median((modelResult$predictionMeans - realValues)^2), MeanSD = mean(predictionSDs), MedSD = median(predictionSDs))
+      coverageProb95 <- mean((realValues > modelResult$predictionMeans + predictionSDs * qnorm(0.025)) & (realValues < modelResult$predictionMeans + predictionSDs * qnorm(0.975)))
+      c(MSPE = mean((modelResult$predictionMeans - realValues)^2), MedSPE = median((modelResult$predictionMeans - realValues)^2), MeanSD = mean(predictionSDs), MedSD = median(predictionSDs), CoverageProb_95 = coverageProb95)
     })
   }
   predStatsByDataset <- lapply(filesToImportInOrder, computePredStats, obsIndicesForTraining = obsIndicesForTraining, simulatedDataList = simulatedDataList)
+
   methodNames <- names(predStatsByDataset[[1]])
   names(methodNames) <- methodNames
+  diffValues <- sapply(predStatsByDataset, function(x) x[["ISMRA"]] - x[["SPDE"]])
+  frameForComparisonPlot <- data.frame(predStatName = rep(c("MSPE", "MedSPE"), each = ncol(diffValues)), Value = c(diffValues["MSPE", ], diffValues["MedSPE", ]))
+  diffBoxPlot <- ggplot2::ggplot(data = frameForComparisonPlot, ggplot2::aes(predStatName, Value)) + ggplot2::geom_boxplot(outlier.colour = "red", outlier.shape = 1, colour = "blue") + ggplot2::theme_bw() + ggplot2::xlab("Prediction statistic") + ggplot2::theme(legend.position = "none", text = ggplot2::element_text(size = 16)) + ggplot2::scale_x_discrete(limits = c("MSPE", "MedSPE"))
   predStatsByMethod <- lapply(methodNames, function(methodName) {
     sapply(predStatsByDataset, "[[", methodName)
   })
+  fancyMethodNames <- c("INLA-SPDE", "IS-MRA")
+  names(fancyMethodNames) <- c("SPDE", "ISMRA")
+  statsByMethodList <- lapply(methodNames, function(methodName) {
+    data.frame(methodName = fancyMethodNames[[methodName]], predStatName = rep(c("MSPE", "MedSPE"), each = ncol(predStatsByMethod[[methodName]])), Value = c(predStatsByMethod[[methodName]]["MSPE", ], predStatsByMethod[[methodName]]["MedSPE", ]))
+  })
+  statsByMethodFrame <- do.call("rbind", statsByMethodList)
+  boxPlotsByMethod <- ggplot2::ggplot(statsByMethodFrame, ggplot2::aes(x = predStatName, y = Value, colour = factor(methodName))) + ggplot2::geom_boxplot(outlier.colour = "red", outlier.shape = 1) + ggplot2::theme_bw() + ggplot2::xlab("Prediction statistic") + ggplot2::scale_colour_hue(name = "Method") + ggplot2::theme(legend.position = c(0.875, 0.875), text = ggplot2::element_text(size = 16)) + ggplot2::scale_x_discrete(limits = c("MSPE", "MedSPE"))
   getStatsByMethod <- function(resultMatrix) {
     t(apply(resultMatrix, 1, function(rowValues) c(Mean = mean(rowValues), SD = sd(rowValues), Median = median(rowValues), Minimum = min(rowValues), Maximum = max(rowValues))))
   }
-  lapply(predStatsByMethod, getStatsByMethod)
+  list(summaryStats = lapply(predStatsByMethod, getStatsByMethod), diffBoxPlots = diffBoxPlot, summaryBoxPlots = boxPlotsByMethod, summaryBoxPlotFrame = statsByMethodFrame, diffBoxPlotFrame = frameForComparisonPlot)
 }
 
-analyseParaEsts <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining, realFEs) {
+analyseParaEsts <- function(folderForSimResults, patternForFilename, simulatedDataList, obsIndicesForTraining, realFEs, realHyperparsLogScale, numSimsForGraphs = 50) {
   patternForExtractingNumber <- "[:digit:]+(?=\\.rds)"
   filesToImport <- list.files(folderForSimResults, pattern = patternForFilename, full.names = TRUE)
   filesIndices <- as.numeric(stringr::str_extract(filesToImport, pattern = patternForExtractingNumber))
   filesToImportInOrder <- filesToImport[order(filesIndices)]
-  computeFEerrorsAndSDs <- function(filename) {
+
+  plotFrames <- .computePlotFrames(filesToImportInOrder = filesToImportInOrder, patternForExtractingNumber = patternForExtractingNumber, realFEs = realFEs)
+
+  FEabsDiffByMethod <- lapply(unique(plotFrames$FE$Method), .getFEabsDiff, plotFrames = plotFrames, realFEs = realFEs)
+  FEtableToPrint <- do.call("cbind", FEabsDiffByMethod)
+  FEtableToPrint <- FEtableToPrint[ , c(rbind((1:ncol(FEabsDiffByMethod[[1]]) + ncol(FEabsDiffByMethod[[1]])), 1:ncol(FEabsDiffByMethod[[1]])))]
+
+  FEcoverageByMethod <- sapply(unique(plotFrames$FE$Method), .getFEcoverageByMethod, plotFrames = plotFrames, realFEs = realFEs)
+  colnames(FEcoverageByMethod) <- unique(plotFrames$FE$Method)
+  rownames(FEcoverageByMethod) <- unique(plotFrames$FE$paraName)
+
+  hyperparAbsDiffByMethod <- lapply(unique(plotFrames$hyperpar$Method), .funToGetHyperparAbsDiff, plotFrames = plotFrames, realHyperparsLogScale = realHyperparsLogScale)
+  hyperparTableToPrint <- do.call("cbind", hyperparAbsDiffByMethod)
+  hyperparTableToPrint <- hyperparTableToPrint[ , c(rbind((1:ncol(hyperparAbsDiffByMethod[[1]]) + ncol(hyperparAbsDiffByMethod[[1]])), 1:ncol(hyperparAbsDiffByMethod[[1]])))]
+
+  hyperCoverageByMethod <- sapply(unique(plotFrames$hyperpar$Method), .getHyperCoverageByMethod, plotFrames = plotFrames, realHyperparsLogScale = realHyperparsLogScale)
+  names(hyperCoverageByMethod) <- unique(plotFrames$hyperpar$Method)
+
+  graphsForOutput <- .getAllGraphs(FEplotFrame = plotFrames$FE, hyperPlotFrame =  plotFrames$hyperpar, realHyperparsLogScale, realFEs = realFEs, numSimsForGraphs = numSimsForGraphs)
+  list(hyperparGraphs = graphsForOutput$hyperparGraphs, FEgraphs = graphsForOutput$FEgraphs, coverageProbsMatrix = rbind(FEcoverageByMethod, hyperCoverageByMethod), parsAbsDiffSummary = rbind(FEtableToPrint, hyperparTableToPrint))
+}
+
+.getHyperCoverageByMethod <- function(methodName, plotFrames, realHyperparsLogScale) {
+  getHyperCoverageByParaName <- function(hyperName) {
+    subFrame <- subset(plotFrames$hyperpar, subset = (paraName == hyperName) & (Method == methodName))
+    realValue <- realHyperparsLogScale[[hyperName]]
+    testValues <- (realValue >= subFrame$CredInt2.5) & (realValue <= subFrame$CredInt97.5)
+    mean(testValues)
+  }
+  hyperCoverageTest <- sapply(names(realHyperparsLogScale), getHyperCoverageByParaName)
+  names(hyperCoverageTest) <- names(realHyperparsLogScale)
+  hyperCoverageTest
+}
+
+.funToGetHyperparAbsDiff <- function(methodName, plotFrames, realHyperparsLogScale) {
+  hyperparAbsDiffStatsByPara <- lapply(unique(plotFrames$hyperpar$paraName), function(parName) {
+    output <- summary(abs(subset(plotFrames$hyperpar, subset = (paraName == parName) & (Method == methodName))$Mean - realHyperparsLogScale[[parName]]))
+    # output <- output[c("Mean", "Min.", "1st Qu.", "Median", "3rd Qu.", "Max.")]
+    output <- output[c("Mean", "Min.", "Median", "Max.")]
+    names(output) <- paste(names(output), methodName, sep = ".")
+    output
+  })
+  hyperparAbsDiffStatsMat <- do.call("rbind", hyperparAbsDiffStatsByPara)
+  rownames(hyperparAbsDiffStatsMat) <- unique(plotFrames$hyperpar$paraName)
+  as.data.frame(hyperparAbsDiffStatsMat)
+}
+
+.getFEcoverageByMethod <- function(methodName, plotFrames, realFEs) {
+  getFEcoverageByParaName <- function(FEname) {
+    subFrame <- subset(plotFrames$FE, subset = (paraName == FEname) & (Method == methodName))
+    realValue <- realFEs[[FEname]]
+    testValues <- (realValue >= subFrame$CredInt2.5) & (realValue <= subFrame$CredInt97.5)
+    mean(testValues)
+  }
+  FEcoverageTest <- sapply(unique(plotFrames$FE$paraName), getFEcoverageByParaName)
+  names(FEcoverageTest) <- names(unique(plotFrames$FE$paraName))
+  FEcoverageTest
+}
+
+.getFEabsDiff <- function(methodName, plotFrames, realFEs) {
+  FEabsDiffStatsByPara <- lapply(unique(plotFrames$FE$paraName), function(parName) {
+    output <- summary(abs(subset(plotFrames$FE, subset = (paraName == parName) & (Method == methodName))$Mean - realFEs[[parName]]))
+    # output <- output[c("Mean", "Min.", "1st Qu.", "Median", "3rd Qu.", "Max.")]
+    output <- output[c("Mean", "Min.", "Median", "Max.")]
+    names(output) <- paste(names(output), methodName, sep = ".")
+    output
+  })
+  FEabsDiffStatsMat <- do.call("rbind", FEabsDiffStatsByPara)
+  rownames(FEabsDiffStatsMat) <- unique(plotFrames$FE$paraName)
+  as.data.frame(FEabsDiffStatsMat)
+}
+
+.getAllGraphs <- function(FEplotFrame, hyperPlotFrame, realHyperparsLogScale, realFEs, numSimsForGraphs) {
+  hyperparGraphs <- lapply(unique(hyperPlotFrame$paraName), function(hyperparName) {
+    ggplot2::ggplot(subset(hyperPlotFrame, subset = (dataIndex <= numSimsForGraphs) & (paraName == hyperparName)), ggplot2::aes(x = dataIndex, group = Method, colour = Method)) + ggplot2::geom_errorbar(ggplot2::aes(ymin = CredInt2.5, ymax = CredInt97.5), width = .2, position = ggplot2::position_dodge(.9)) + ggplot2::theme_bw() + ggplot2::theme(legend.position = c(0.85, 0.9), text = ggplot2::element_text(size = 16)) + ggplot2::scale_colour_manual(values = c("goldenrod", "blue")) + ggplot2::geom_hline(yintercept = realHyperparsLogScale[[hyperparName]], linetype="dashed", color = "red") + ggplot2::xlab("Sim. dataset index") + ggplot2::ylab("Log-para. value")
+  })
+  names(hyperparGraphs) <- unique(hyperPlotFrame$paraName)
+  FEgraphs <- lapply(unique(FEplotFrame$paraName), function(FEname) {
+    ggplot2::ggplot(subset(FEplotFrame, subset = (dataIndex <= numSimsForGraphs) & (paraName == FEname)), ggplot2::aes(x = dataIndex, group = Method, colour = Method)) + ggplot2::geom_errorbar(ggplot2::aes(ymin = CredInt2.5, ymax = CredInt97.5), width = .2, position = ggplot2::position_dodge(.9)) + ggplot2::theme_bw() + ggplot2::theme(legend.position = c(0.85, 0.9), text = ggplot2::element_text(size = 16)) + ggplot2::scale_colour_manual(values = c("goldenrod", "blue"), breaks = c("SPDE", "ISMRA"), labels = c("INLA-SPDE", "IS-MRA")) + ggplot2::geom_hline(yintercept = realFEs[[FEname]], linetype="dashed", color = "red") + ggplot2::xlab("Sim. dataset index") + ggplot2::ylab("Log-para. value")
+  })
+  names(FEgraphs) <- unique(FEplotFrame$paraName)
+  list(hyperparGraphs = hyperparGraphs, FEgraphs = FEgraphs)
+}
+
+.computePlotFrames <- function(filesToImportInOrder, patternForExtractingNumber, realFEs) {
+  computeFEplotFrames <- function(filename) {
     datasetIndex <- as.numeric(stringr::str_extract(filename, pattern = patternForExtractingNumber))
     simResults <- readRDS(filename)
     methodNames <- names(simResults)
     names(methodNames) <- methodNames
-    lapply(methodNames, function(methodName) {
-      FEandSD <- getFEmeansAndSDs(simResults[[methodName]]$fittedModel)
-      commonNames <- intersect(names(realFEs), rownames(FEandSD))
-      reorderedFEandSD <- FEandSD[commonNames, ]
-      absError <- abs(realFEs[commonNames] - reorderedFEandSD$Mean)
-      SDs <- reorderedFEandSD$SD
-      data.frame(absError = absError, SD = SDs)
-    })
+    getPlotFrame <- function(methodName) {
+      FEandSDandCIs <- getFEmeansAndSDsAndCIs(simResults[[methodName]]$fittedModel)
+      commonNames <- intersect(names(realFEs), rownames(FEandSDandCIs))
+      output <- cbind(dataIndex = datasetIndex, Method = methodName, FEandSDandCIs[commonNames, ])
+      rownames(output) <- NULL
+      output
+    }
+    do.call("rbind", lapply(methodNames, getPlotFrame))
   }
-  FEerrorsAndSDsByDataset <- lapply(filesToImportInOrder, FUN = computeFEerrorsAndSDs)
-  methodNames <- names(FEerrorsAndSDsByDataset[[1]])
-  names(methodNames) <- methodNames
-  meanFEerrorsByMethod <- lapply(methodNames, function(methodName) {
-    FEerrorsAcrossDataset <- sapply(seq_along(FEerrorsAndSDsByDataset), function(datasetIndex) {
-      FEerrorsAndSDsByDataset[[datasetIndex]][[methodName]]$absError
-    })
-    meanResult <- rowMeans(FEerrorsAcrossDataset)
-    names(meanResult) <- rownames(FEerrorsAndSDsByDataset[[1]][[methodName]])
-    meanResult
-  })
-  meanFEsdsByMethod <- lapply(methodNames, function(methodName) {
-    FEsdsByDataset <- sapply(seq_along(FEerrorsAndSDsByDataset), function(datasetIndex) {
-      FEerrorsAndSDsByDataset[[datasetIndex]][[methodName]]$SD
-    })
-    meanResult <- rowMeans(FEsdsByDataset)
-    names(meanResult) <- rownames(FEerrorsAndSDsByDataset[[1]][[methodName]])
-    meanResult
-  })
-
-  AbsErrorAndSDbyMethod <- lapply(methodNames, function(methodName) {
-    data.frame(AbsError = meanFEerrorsByMethod[[methodName]], EstSD = meanFEsdsByMethod[[methodName]])
-  })
-  AbsErrorAndSDbyMethod
+  FEplotFrame <- do.call("rbind", lapply(filesToImportInOrder, FUN = computeFEplotFrames))
+  hyperPlotFrame <- do.call("rbind", lapply(filesToImportInOrder, .funToGetHyperPlotFrame, patternForExtractingNumber = patternForExtractingNumber))
+  list(FE = FEplotFrame, hyperpar = hyperPlotFrame)
 }
 
-getFEmeansAndSDs <- function(outputObject) {
+.funToGetHyperPlotFrame <- function(filename, patternForExtractingNumber) {
+  datasetIndex <- as.numeric(stringr::str_extract(filename, pattern = patternForExtractingNumber))
+  simResults <- readRDS(filename)
+  methodNames <- names(simResults)
+  names(methodNames) <- methodNames
+  ISMRAvalues <- simResults$ISMRA$fittedModel$hyperMarginalMoments[ , c("Mean", "CredInt_2.5%", "CredInt_97.5%")]
+  SPDEparasToExtract <- c("Theta2 for space", "GroupRho for space", "Theta1 for space")
+  SPDEvalues <- simResults$SPDE$fittedModel$summary.hyperpar[SPDEparasToExtract, c("mean", "0.025quant", "0.975quant")]
+  # We adjust SPDE values to get them to match those in IS-MRA: parameterisations are different. We use medians because we'll need to transform GroupRho.
+  SPDEvalues["Theta2 for space", ] <- SPDEvalues["Theta2 for space", ] - log(2) # Spatial range parameter in SPDE is twice that used in IS-MRA
+  # SPDEvalues["GroupRho for space", ] <- log(-log((exp(SPDEvalues["GroupRho for space", ]) - 1)/(exp(SPDEvalues["GroupRho for space", ]) + 1)))
+  simValuesForRhoTime <- rnorm(n = 5000, mean = simResults$SPDE$fittedModel$summary.hyperpar["GroupRho for space", "mean"], sd = simResults$SPDE$fittedModel$summary.hyperpar["GroupRho for space", "sd"]) ## In practice, skewness for GroupTheta is very small, hence the decision to simulate from a normal distribution.
+  transformedSimValues <- log(-log((exp(simValuesForRhoTime) - 1)/(exp(simValuesForRhoTime) + 1)))
+  SPDEvalues["GroupRho for space", ] <- c(mean(transformedSimValues), quantile(x = transformedSimValues, probs = c(0.025, 0.975)))
+  colnames(SPDEvalues) <- c("Mean", "CredInt_2.5%", "CredInt_97.5%")
+  rownames(SPDEvalues) <- rownames(simResults$ISMRA$fittedModel$hyperMarginalMoments)
+  SPDEresultFrame <- data.frame(dataIndex = datasetIndex, Mean = SPDEvalues[ , "Mean"], paraName = rownames(SPDEvalues), Method = "SPDE", CredInt2.5 = SPDEvalues[ , "CredInt_2.5%"], CredInt97.5 = SPDEvalues[ , "CredInt_97.5%"])
+  ISMRAresultFrame <- data.frame(dataIndex = datasetIndex, Mean = ISMRAvalues[ , "Mean"], paraName = rownames(ISMRAvalues), Method = "ISMRA", CredInt2.5 = ISMRAvalues[ , "CredInt_2.5%"], CredInt97.5 = ISMRAvalues[ , "CredInt_97.5%"])
+  rbind(SPDEresultFrame, ISMRAresultFrame)
+}
+
+getFEmeansAndSDsAndCIs <- function(outputObject) {
   output <- NULL
   if ("INLAMRA" %in% class(outputObject)) {
-    output <- outputObject$FEmarginalMoments[ , c("Mean", "StdDev")]
+    output <- outputObject$FEmarginalMoments[ , c("Mean", "StdDev", "CredInt_2.5%", "CredInt_97.5%")]
   } else if (!is.null(outputObject$summary.fixed)) {
-    output <- outputObject$summary.fixed[, c("mean", "sd")]
+    output <- outputObject$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
   }
-  colnames(output) <- c("Mean", "SD")
-  output
+  colnames(output) <- c("Mean", "SD", "CredInt2.5", "CredInt97.5")
+  cbind(paraName = rownames(output), output)
 }
 
 getPredictionsAndSDsFromINLAoutput <- function(INLAoutput, responseVecTraining, covariateMatrixTest, coordinatesMatrixTest, timeVecNumericTest, covariateMatrixTraining, coordinatesMatrixTraining, timeVecNumericTraining, control) {
@@ -590,8 +687,14 @@ refitSPDE <- function(
   timeVecNumeric,
   funToFitSPDE = fitSPDE,
   controlForSPDE,
+  controlForISMRA,
   numThreads,
   obsIndicesForTraining) {
+  controlForSPDE <- do.call("create.SPDE.control", controlForSPDE)
+  controlForISMRA <- do.call("create.ISMRA.control", controlForISMRA)
+  controlForSPDE$fixedHyperValues <- controlForISMRA$fixedHyperValues
+  controlForSPDE$hyperStart <- controlForISMRA$hyperStart
+  controlForSPDE$logHyperpriorSDinISMRA <- controlForISMRA$logHyperpriorSD
   filenames <- list.files(path = folderForSimulationResults, pattern = patternForFilename, full.names = TRUE)
   refitSPDEinner <- function(filename) {
     dataIndex <- as.numeric(stringr::str_extract(filename, pattern = "[:digit:]+(?=\\.rds)"))
@@ -611,6 +714,41 @@ refitSPDE <- function(
     invisible(NULL)
   }
   lapply(filenames, refitSPDEinner)
+  invisible(NULL)
+}
+
+# This function will go through saved results and refit IS-MRA
+refitISMRA <- function(
+  folderForSimulationResults,
+  patternForFilename = "Dataset",
+  responseMatrix,
+  covariateMatrix,
+  coordinatesMatrix,
+  timeVecNumeric,
+  funToFitISMRA = fitISMRA,
+  controlForISMRA,
+  numThreads,
+  obsIndicesForTraining) {
+  controlForISMRA <- do.call("create.ISMRA.control", controlForISMRA)
+  filenames <- list.files(path = folderForSimulationResults, pattern = patternForFilename, full.names = TRUE)
+  refitISMRAinner <- function(filename) {
+    dataIndex <- as.numeric(stringr::str_extract(filename, pattern = "[:digit:]+(?=\\.rds)"))
+    responseVecForTraining <- responseMatrix[obsIndicesForTraining, dataIndex]
+    covariateMatrixForTraining <- covariateMatrix[obsIndicesForTraining, ]
+    coordinatesMatrixForTraining <- coordinatesMatrix[obsIndicesForTraining, ]
+    timeVecNumericForTraining <- timeVecNumeric[obsIndicesForTraining]
+    predCoordinatesMatrix <- coordinatesMatrix[!obsIndicesForTraining, ]
+    predCovariateMatrix <- covariateMatrix[!obsIndicesForTraining, ]
+    predTimeVecNumeric <- timeVecNumeric[!obsIndicesForTraining]
+
+    listResult <- funToFitISMRA(responseVec = responseVecForTraining, covariateMatrix = covariateMatrixForTraining, coordinatesMatrix = coordinatesMatrixForTraining, predCovariateMatrix = predCovariateMatrix, predCoordinatesMatrix = predCoordinatesMatrix, timeVecNumeric = timeVecNumericForTraining, predTimeVecNumeric = predTimeVecNumeric, numThreads = numThreads, control = controlForISMRA)
+    oldResult <- readRDS(filename)
+    oldResult$ISMRA <- listResult
+    saveRDS(oldResult, filename)
+    cat("Updated ISMRA fit in", filename, "\n")
+    invisible(NULL)
+  }
+  lapply(filenames, refitISMRAinner)
   invisible(NULL)
 }
 
@@ -751,4 +889,22 @@ produceTestData <- function(indiaTemperatures, landCover, elevation, collectionD
   testDataMay28
 }
 
-
+copySPDEresults <- function(originFolder, destinationFolder, patternForFilename) {
+  filenames <- list.files(path = originFolder, pattern = patternForFilename, full.names = TRUE)
+  filenamesWithoutFolder <- list.files(path = originFolder, pattern = patternForFilename, full.names = FALSE)
+  dataIndices <- as.numeric(stringr::str_extract(filenames, pattern = "[:digit:]+(?=\\.rds)"))
+  orderedFilenames <- filenames[order(dataIndices)]
+  orderedFilenamesWithoutFolder <- filenamesWithoutFolder[order(dataIndices)]
+  funToReplaceSPDEcomponent <- function(index) {
+    oriSimResults <- readRDS(orderedFilenames[[index]])
+    fileToLoad <- list.files(path = destinationFolder, pattern = orderedFilenamesWithoutFolder[[index]], full.names = TRUE)
+    simResultsToUpdate <- readRDS(fileToLoad)
+    simResultsToUpdate$SPDE <- oriSimResults$SPDE
+    saveRDS(simResultsToUpdate, file = fileToLoad)
+    cat("Updated", fileToLoad, "\n")
+    NULL
+  }
+  lapply(sort(dataIndices), funToReplaceSPDEcomponent)
+  cat("Done copying SPDE results.\n")
+  invisible(NULL)
+}

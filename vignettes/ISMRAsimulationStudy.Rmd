@@ -176,6 +176,9 @@ obsIndicesForTraining <-
       (simulatedDatasetsList$coords$latitude <= latitudeQuantiles[[2]]) &
       (simulatedDatasetsList$coords$latitude >= latitudeQuantiles[[1]]))
 
+realValues <- simulatedDatasetsList$responses[!obsIndicesForTraining, 4]
+fixedEffsContribs <- as.vector(simulatedDatasetsList$covariates[!obsIndicesForTraining, ] %*% fixedEffectsVec[colnames(simulatedDatasetsList$covariates)]) + interceptValue
+
 # For Vecchia
 
 # dataCovarianceMatrix <- matrix(0, nrow(simulatedDatasetsList$responses), nrow(simulatedDatasetsList$responses))
@@ -187,7 +190,7 @@ obsIndicesForTraining <-
 # dataCovarianceMatrix[upper.tri(dataCovarianceMatrix)] <- dataCovarianceMatrix[lower.tri(dataCovarianceMatrix)]
 
 fittedModelsByDataset <- lapply(
-  X = 1:100, 
+  X = 1, 
   FUN = simulationFun,
   responseMatrix = simulatedDatasetsList$responses,
   covariateMatrix = simulatedDatasetsList$covariates,
@@ -199,31 +202,75 @@ fittedModelsByDataset <- lapply(
   funToFitISMRA = fitISMRA,
   numThreads = 4,
   controlForSPDE = list(
-    mesh.2d.offset = c(5,5),
-    mesh.2d.max.edge = 0.5,
+    mesh.2d.offset = c(2,2),
+    mesh.2d.max.edge = 2,
     sigma0 = 1,
     kappa0 = sqrt(8 * 1.5)), # We assume that spatial smoothness is 1.5 and baseline range rho0 is 1, i.e. log(rho0) = 0.
   controlForISMRA = list(control = list(
-    Mlon = 4,
-    Mlat = 4,
+    Mlon = 2,
+    Mlat = 2,
     Mtime = 0,
     numKnotsRes0 = 8,
     numIterOptim = 20,
     tipKnotsThinningRate = 1,
-    numValuesForIS = 150,
-    returnQmat = FALSE
+    numValuesForIS = 50,
+    returnQmat = TRUE
   )),
   saveDirectory = "outputFiles/")
 ```
-
 We now obtain summaries for prediction accuracy across all simulations for both IS-MRA and SPDE.
 ```{r, eval = FALSE}
+simulationFiles <- list.files(path = "outputFilesSmallerM/", pattern = "ISMRAsimulationResults", full.names=T)
+simulationResults <- lapply(simulationFiles, readRDS)
 realFEvalues <- fixedEffectsVec[colnames(simulatedDatasetsList$covariates)]
-predictionSummariesByMethod <- analysePredResults(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, shiftISMRApostPredVars = -errorSD^2) # The shiftISMRApostPredVars argument removes the effect of errorSD^2 in kriging SDs, to make them comparable to those reported by INLA.
-mergedTables <- do.call("rbind", predictionSummariesByMethod)
-xtable::xtable(mergedTables, digits = 3)
-FEerrorsAndSDsByMethod <- analyseParaEsts(folderForSimResults = "outputFiles/", patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, realFEs = realFEvalues)
-lapply(FEerrorsAndSDsByMethod, xtable::xtable, digits = 3)
+funToProduceGraphs <- function(dirName, dpi = 400, height = 8, width = 8) {
+  predictionSummariesByMethod <- analysePredResults(folderForSimResults = dirName, patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, shiftISMRApostPredSDs = 0)
+  FEandHyperGraphsAndCovProbs <- analyseParaEsts(folderForSimResults = dirName, patternForFilename = "Dataset[[:digit:]]+.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, realFEs = realFEvalues, realHyperparsLogScale = c(space.rho = log(spRange), time.rho = log(timeRange), scale = log(spScale)))
+  # ggplot2::ggsave(plot = predictionSummariesByMethod$diffBoxPlots, filename = paste(dirName, "diffBoxPlots.jpeg", sep = "/"), device = "jpeg", width = width, height = height, units = "in", dpi = dpi)
+  # ggplot2::ggsave(plot = predictionSummariesByMethod$summaryBoxPlots, filename = paste(dirName, "boxPlotsByMethod.jpeg", sep = "/"), device = "jpeg", width = width, height = height, units = "in", dpi = dpi)
+  # lapply(names(FEandHyperGraphsAndCovProbs$FEgraphs), function(FEname) {
+  #   ggplot2::ggsave(plot = FEandHyperGraphsAndCovProbs$FEgraphs[[FEname]], filename = paste(dirName, "/FEgraph_", FEname,".jpeg", sep = ""), device = "jpeg", width = width, height = height, units = "in", dpi = dpi)
+  # })
+  # lapply(names(FEandHyperGraphsAndCovProbs$hyperparGraphs), function(hyperName) {
+  #   hyperNameForFilename <- stringr::str_replace(hyperName, pattern = "\\.", replacement = "") # An extra dot in the filename might cause problems on certain systems
+  # ggplot2::ggsave(plot = FEandHyperGraphsAndCovProbs$hyperparGraphs[[hyperName]], filename = paste(dirName, "/hyperparGraph_", hyperNameForFilename, ".jpeg", sep = ""), device = "jpeg", width = width, height = height, units = "in", dpi = dpi)
+  # })
+  list(FEandHyperSummary = FEandHyperGraphsAndCovProbs, predSummary = predictionSummariesByMethod)
+}
+predAndFittedParsSummaries <- lapply(c("outputFiles/", "outputFilesSmallerM/"), funToProduceGraphs)
+
+summaryPlotFrames <- list(
+  K6 = subset(predAndFittedParsSummaries[[1]]$predSummary$summaryBoxPlotFrame, methodName == "IS-MRA"),
+  K4 = subset(predAndFittedParsSummaries[[2]]$predSummary$summaryBoxPlotFrame, methodName == "IS-MRA"),
+  SPDE = subset(predAndFittedParsSummaries[[2]]$predSummary$summaryBoxPlotFrame, methodName == "INLA-SPDE")) # SPDE is the same fit in outputFiles and outputFilesSmallerM. 
+
+namesToIterOver <- c("K6", "K4")
+summaryPlotFrames[namesToIterOver] <- lapply(namesToIterOver, function(nameToInput) {
+  K <- stringr::str_sub(nameToInput, start = -1)
+  summaryPlotFrames[[nameToInput]]$methodName <- replace(summaryPlotFrames[[nameToInput]]$methodName, which(summaryPlotFrames[[nameToInput]]$methodName == "IS-MRA"), paste("IS-MRA (K=", K, ")", sep = ""))
+  summaryPlotFrames[[nameToInput]]
+})
+boxPlotObject <- ggplot2::ggplot(do.call("rbind", summaryPlotFrames), ggplot2::aes(x = predStatName, y = Value, colour = factor(methodName))) + ggplot2::geom_boxplot(outlier.colour = "red", outlier.shape = 1) + ggplot2::theme_bw() + ggplot2::xlab("Prediction statistic") + ggplot2::scale_colour_hue(name = "Method") + ggplot2::theme(legend.position = c(0.875, 0.875), text = ggplot2::element_text(size = 16)) + ggplot2::scale_x_discrete(limits = c("MSPE", "MedSPE"))
+ggplot2::ggsave(plot = boxPlotObject, filename = "outputFiles/summaryBoxPlotsK6_K4_SPDE.jpeg", device = "jpeg", width = 8, height = 8, dpi = 400)
+
+
+formattedTables <- lapply(predAndFittedParsSummaries, function(x) {
+  methodNames <- c("SPDE", "ISMRA")
+  printList <- lapply(methodNames, function(methodName) {
+    stringToPrint <- xtable::xtable(x$predSummary$summaryStats[[methodName]], digits = 4)
+    stringToPrint
+  })
+  names(printList) <- methodNames
+  printList
+})
+coverageProbs <- cbind(predAndFittedParsSummaries[[1]]$FEandHyperSummary$coverageProbsMatrix, predAndFittedParsSummaries[[2]]$FEandHyperSummary$coverageProbsMatrix[, "ISMRA"])
+colnames(coverageProbs) <- c("SPDE", "IS-MRA_K6", "IS-MRA_K4")
+xtable::xtable(coverageProbs)
+hyperparNames <- c(spatialRange = "space.rho", temporalRange = "time.rho", scale = "scale")
+lapply(seq_along(hyperparNames), function(hyperparIndex) {
+  filename <- paste("outputFiles/", names(hyperparNames)[[hyperparIndex]], "CredIntsAcrossSims.jpeg", sep = "")
+  ggplot2::ggsave(filename = filename, predAndFittedParsSummaries[[1]]$FEandHyperSummary$hyperparGraphs[[hyperparNames[[hyperparIndex]]]], device = "jpeg", width = 8, height = 8, dpi = 400)
+})
 ```
 In order to reduce the memory footprint, the INLAMRA function does not return the full conditional precision matrix by default. However, in order to show its structure, we can make it return it.
 ```{r, eval=FALSE}
@@ -292,5 +339,9 @@ for (dayToPlot in c("May27", "May28", "May29")) {
   raster::plot(rasterToPlot, col = ecol$col, breaks = colourBreaks, legend = TRUE)
 }
 dev.off()
+```
+```{r, eval=F}
+# copySPDEresults(originFolder = "outputFiles/", destinationFolder = "outputFilesSmallerM/", patternForFilename = "Dataset[[:digit:]]+.rds$")
+copySPDEresults(originFolder = "outputFiles/", destinationFolder = "outputFilesSmallerM/", patternForFilename = "Dataset[[:digit:]]+\\.rds$")
 ```
 
