@@ -135,11 +135,12 @@ fitSPDE <- function(responseVec, covariateMatrix, coordinatesMatrix, timeVecNume
   error.prior.prec <- list(initial = 1/control$fixedHyperValues$errorSD^2, prior = "normal", fixed = TRUE)  # The precision in the Gaussian family is represented on the log-scale.
   control.family.value <- list(hyper = list(prec = error.prior.prec))
   randomValuesFromTimeRangePrior <- rnorm(10000, mean = control$hyperStart$time[["rho"]], sd = control$logHyperpriorSDinISMRA)
-  transformedValues <- log(1 + exp(-exp(randomValuesFromTimeRangePrior))) - log(1 - exp(-exp(randomValuesFromTimeRangePrior)))
+  transformedValues <- log(1 + exp(-1/exp(randomValuesFromTimeRangePrior))) - log(1 - exp(-1/exp(randomValuesFromTimeRangePrior)))
   meanForPrior <- mean(transformedValues)
   precForPrior <- 1/var(transformedValues)
 
-  formulaForSPDE <- y ~ 1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + Urban + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1", hyper = list(theta = list(prior = "normal", param = c(mean = meanForPrior, precision = precForPrior), initial = meanForPrior, fixed = FALSE))))
+  # formulaForSPDE <- y ~ 1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + Urban + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1", hyper = list(theta = list(prior = "normal", param = c(mean = meanForPrior, precision = precForPrior), initial = meanForPrior, fixed = FALSE))))
+  formulaForSPDE <- y ~ 1 + elevation + May28 + May29 + EvergreenBroadleaf + MixedForest + ClosedShrublands + Savannas + Grasslands + PermanentWetlands + Croplands + Urban + CroplandNaturalMosaics + NonVegetated + f(space, model = spde, group = space.group, control.group = list(model = "ar1", hyper = list("logit correlation" = list(prior = "normal", param = c(mean = meanForPrior, precision = precForPrior), initial = meanForPrior, fixed = FALSE))))
 
   SPDEresult <- tryCatch(
     expr = INLA::inla(
@@ -402,7 +403,7 @@ analyseParaEsts <- function(folderForSimResults, patternForFilename, simulatedDa
   names(hyperCoverageByMethod) <- unique(plotFrames$hyperpar$Method)
 
   graphsForOutput <- .getAllGraphs(FEplotFrame = plotFrames$FE, hyperPlotFrame =  plotFrames$hyperpar, realHyperparsLogScale, realFEs = realFEs, numSimsForGraphs = numSimsForGraphs)
-  list(hyperparGraphs = graphsForOutput$hyperparGraphs, FEgraphs = graphsForOutput$FEgraphs, coverageProbsMatrix = rbind(FEcoverageByMethod, hyperCoverageByMethod), parsAbsDiffSummary = rbind(FEtableToPrint, hyperparTableToPrint))
+  list(hyperparGraphs = graphsForOutput$hyperparGraphs, FEgraphs = graphsForOutput$FEgraphs, coverageProbsMatrix = rbind(FEcoverageByMethod, hyperCoverageByMethod), parsAbsDiffSummary = rbind(FEtableToPrint, hyperparTableToPrint), parPlotFrames = plotFrames)
 }
 
 .getHyperCoverageByMethod <- function(methodName, plotFrames, realHyperparsLogScale) {
@@ -499,7 +500,7 @@ analyseParaEsts <- function(folderForSimResults, patternForFilename, simulatedDa
   SPDEvalues["Theta2 for space", ] <- SPDEvalues["Theta2 for space", ] - log(2) # Spatial range parameter in SPDE is twice that used in IS-MRA
   # SPDEvalues["GroupRho for space", ] <- log(-log((exp(SPDEvalues["GroupRho for space", ]) - 1)/(exp(SPDEvalues["GroupRho for space", ]) + 1)))
   simValuesForRhoTime <- rnorm(n = 5000, mean = simResults$SPDE$fittedModel$summary.hyperpar["GroupRho for space", "mean"], sd = simResults$SPDE$fittedModel$summary.hyperpar["GroupRho for space", "sd"]) ## In practice, skewness for GroupTheta is very small, hence the decision to simulate from a normal distribution.
-  transformedSimValues <- log(-log((exp(simValuesForRhoTime) - 1)/(exp(simValuesForRhoTime) + 1)))
+  transformedSimValues <- -log(-log((exp(simValuesForRhoTime) - 1)/(exp(simValuesForRhoTime) + 1)))
   SPDEvalues["GroupRho for space", ] <- c(mean(transformedSimValues), quantile(x = transformedSimValues, probs = c(0.025, 0.975)))
   colnames(SPDEvalues) <- c("Mean", "CredInt_2.5%", "CredInt_97.5%")
   rownames(SPDEvalues) <- rownames(simResults$ISMRA$fittedModel$hyperMarginalMoments)
