@@ -141,6 +141,30 @@ indiaRasterReprojected <- raster(x = indiaExtent, nrows = nrow(indiaTemperatures
 # > identical(crs(indiaPolygons), crs(cityPoints))
 # [1] FALSE
 # This bug results almost surely from the update in gdal.
+# Very odd:
+# > foo <- crs(cityPoints)
+# > bar <- crs(indiaPolygons)
+# > foo
+# CRS arguments: +proj=longlat +datum=WGS84 +no_defs 
+# > bar
+# CRS arguments: +proj=longlat +datum=WGS84 +no_defs 
+# > slotNames(foo)
+# [1] "projargs"
+# > isS4(foo)
+# [1] TRUE
+# > slotNames(bar)
+# [1] "projargs"
+# > foo@projargs
+# [1] "+proj=longlat +datum=WGS84 +no_defs"
+# > bar@projargs
+# [1] "+proj=longlat +datum=WGS84 +no_defs"
+# > identical(bar@projargs, foo@projargs)
+# [1] TRUE
+# > object.size(foo)
+# 1496 bytes
+# > object.size(bar)
+# 1560 bytes
+# The only component of both objects are identical, but the objects have different size!
 
 lapply(c("2012-05-27", "2012-05-28", "2012-05-29"), function(dateName) {
   rasterReprojected <- raster::projectRaster(from = indiaTemperaturesLastWeek[[dateName]], to = indiaRasterReprojected)
@@ -201,7 +225,7 @@ values(may21rasterAddedMissing) <- replace(values(may21rasterAddedMissing), indi
 may21rasterAddedMissingReproj <- projectRaster(from = may21rasterAddedMissing, to = emptyRaster)
 may21rasterReproj <- projectRaster(from = may21raster, to = emptyRaster)
 
-ecolBasicValid <- mapmisc::colourScale(values(may21rasterReproj), col = "Spectral", dec = 0, breaks = 10, rev = TRUE, style = "equal", opacity = 0.5)
+ecolBasicValid <- mapmisc::colourScale(values(may21rasterReproj), col = "Spectral", dec = 0, breaks = c(20, 25, 30, 35, 40, 45, 50, 55, 60), style = 'fixed', rev = TRUE, opacity = 0.5)
 jpeg("outputFiles/may21rasterOriginal.jpg", width = 1200, height = 1200)
 raster::plot(may21rasterReproj, legend = FALSE, cex.axis = 2.5, col = ecolBasicValid$col, breaks = ecolBasicValid$breaks)
 raster::plot(indiaPolygons, add = TRUE)
