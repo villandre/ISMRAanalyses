@@ -498,9 +498,11 @@ analyseParaEsts <- function(folderForSimResults, patternForFilename, simulatedDa
   SPDEvalues <- simResults$SPDE$fittedModel$summary.hyperpar[SPDEparasToExtract, c("mean", "0.025quant", "0.975quant")]
   # We adjust SPDE values to get them to match those in IS-MRA: parameterisations are different. We use medians because we'll need to transform GroupRho.
   SPDEvalues["Theta2 for space", ] <- SPDEvalues["Theta2 for space", ] - log(2) # Spatial range parameter in SPDE is twice that used in IS-MRA
+  SPDEvalues["Theta1 for space", ] <- SPDEvalues["Theta1 for space", ] - log(2)
   # SPDEvalues["GroupRho for space", ] <- log(-log((exp(SPDEvalues["GroupRho for space", ]) - 1)/(exp(SPDEvalues["GroupRho for space", ]) + 1)))
-  simValuesForRhoTime <- rnorm(n = 5000, mean = simResults$SPDE$fittedModel$summary.hyperpar["GroupRho for space", "mean"], sd = simResults$SPDE$fittedModel$summary.hyperpar["GroupRho for space", "sd"]) ## In practice, skewness for GroupTheta is very small, hence the decision to simulate from a normal distribution.
-  transformedSimValues <- -log(-log((exp(simValuesForRhoTime) - 1)/(exp(simValuesForRhoTime) + 1)))
+  simValuesForRhoTime <- rnorm(n = 5000, mean = simResults$SPDE$fittedModel$summary.hyperpar["GroupRho for space", "mean"], sd = simResults$SPDE$fittedModel$summary.hyperpar["GroupRho for space", "sd"]) ## In practice, skewness for GroupTheta is very small, hence the decision to simulate from a normal distribution. Also, sd is small, so no values under zero should be produced.
+  # transformedSimValues <- -log(-log((exp(simValuesForRhoTime) - 1)/(exp(simValuesForRhoTime) + 1)))
+  transformedSimValues <- log(-1/log(simValuesForRhoTime))
   SPDEvalues["GroupRho for space", ] <- c(mean(transformedSimValues), quantile(x = transformedSimValues, probs = c(0.025, 0.975)))
   colnames(SPDEvalues) <- c("Mean", "CredInt_2.5%", "CredInt_97.5%")
   rownames(SPDEvalues) <- rownames(simResults$ISMRA$fittedModel$hyperMarginalMoments)

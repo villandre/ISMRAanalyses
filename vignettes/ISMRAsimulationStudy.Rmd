@@ -207,25 +207,26 @@ fittedModelsByDataset <- lapply(
     sigma0 = 1,
     kappa0 = sqrt(8 * 1.5)), # We assume that spatial smoothness is 1.5 and baseline range rho0 is 1, i.e. log(rho0) = 0.
   controlForISMRA = list(control = list(
-    Mlon = 2,
-    Mlat = 2,
+    Mlon = 3,
+    Mlat = 3,
     Mtime = 0,
     numKnotsRes0 = 8,
     numIterOptim = 20,
     tipKnotsThinningRate = 1,
     numValuesForIS = 50,
     returnQmat = TRUE
-  )),
-  saveDirectory = "outputFiles/")
+  )))
+  # saveDirectory = "outputFiles/")
 ```
 We now obtain summaries for prediction accuracy across all simulations for both IS-MRA and SPDE.
 ```{r, eval = FALSE}
 simulationFiles <- list.files(path = "outputFilesSmallerM/", pattern = "ISMRAsimulationResults", full.names=T)
 simulationResults <- lapply(simulationFiles, readRDS)
 realFEvalues <- fixedEffectsVec[colnames(simulatedDatasetsList$covariates)]
+realHyperparsLogScale <- c(space.rho = log(spRange), time.rho = log(timeRange), scale = log(spScale))
 funToProduceGraphs <- function(dirName, dpi = 400, height = 8, width = 8) {
   predictionSummariesByMethod <- analysePredResults(folderForSimResults = dirName, patternForFilename = "Dataset[[:digit:]]+\\.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, shiftISMRApostPredSDs = 0)
-  FEandHyperGraphsAndCovProbs <- analyseParaEsts(folderForSimResults = dirName, patternForFilename = "Dataset[[:digit:]]+.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, realFEs = realFEvalues, realHyperparsLogScale = c(space.rho = log(spRange), time.rho = log(timeRange), scale = log(spScale)))
+  FEandHyperGraphsAndCovProbs <- analyseParaEsts(folderForSimResults = dirName, patternForFilename = "Dataset[[:digit:]]+.rds$", simulatedDataList = simulatedDatasetsList, obsIndicesForTraining = obsIndicesForTraining, realFEs = realFEvalues, realHyperparsLogScale = realHyperparsLogScale)
   # ggplot2::ggsave(plot = predictionSummariesByMethod$diffBoxPlots, filename = paste(dirName, "diffBoxPlots.jpeg", sep = "/"), device = "jpeg", width = width, height = height, units = "in", dpi = dpi)
   # ggplot2::ggsave(plot = predictionSummariesByMethod$summaryBoxPlots, filename = paste(dirName, "boxPlotsByMethod.jpeg", sep = "/"), device = "jpeg", width = width, height = height, units = "in", dpi = dpi)
   # lapply(names(FEandHyperGraphsAndCovProbs$FEgraphs), function(FEname) {
@@ -239,6 +240,18 @@ funToProduceGraphs <- function(dirName, dpi = 400, height = 8, width = 8) {
 }
 predAndFittedParsSummaries <- lapply(c("outputFiles/", "outputFilesSmallerM/"), funToProduceGraphs)
 
+absDiffMats <- list(
+  K6 = predAndFittedParsSummaries[[1]]$FEandHyperSummary$parsAbsDiffSummary,
+  K4 = predAndFittedParsSummaries[[2]]$FEandHyperSummary$parsAbsDiffSummary)
+fixColnames <- function(matName) {
+  colnames(absDiffMats[[matName]]) <- stringr::str_replace(colnames(absDiffMats[[matName]]), "ISMRA", paste("ISMRA", matName, sep = "_"))
+  absDiffMats[[matName]]
+}
+absDiffMats <- lapply(names(absDiffMats), fixColnames)
+tableForPaper <- cbind(absDiffMats[[1]], absDiffMats[[2]][ , grep(pattern = "ISMRA", x = colnames(absDiffMats[[2]]))])
+tableForPaper <- tableForPaper[ , c(sort(grep("Mean", colnames(tableForPaper), value = T)), sort(grep("Min", colnames(tableForPaper), value = T)), sort(grep("Max", colnames(tableForPaper), value = T)))]
+xtable::xtable(tableForPaper, digits = 4)
+
 summaryPlotFrames <- list(
   K6 = subset(predAndFittedParsSummaries[[1]]$predSummary$summaryBoxPlotFrame, methodName == "IS-MRA"),
   K4 = subset(predAndFittedParsSummaries[[2]]$predSummary$summaryBoxPlotFrame, methodName == "IS-MRA"),
@@ -250,9 +263,61 @@ summaryPlotFrames[namesToIterOver] <- lapply(namesToIterOver, function(nameToInp
   summaryPlotFrames[[nameToInput]]$methodName <- replace(summaryPlotFrames[[nameToInput]]$methodName, which(summaryPlotFrames[[nameToInput]]$methodName == "IS-MRA"), paste("IS-MRA (K=", K, ")", sep = ""))
   summaryPlotFrames[[nameToInput]]
 })
-boxPlotObject <- ggplot2::ggplot(do.call("rbind", summaryPlotFrames), ggplot2::aes(x = predStatName, y = Value, colour = factor(methodName))) + ggplot2::geom_boxplot(outlier.colour = "red", outlier.shape = 1) + ggplot2::theme_bw() + ggplot2::xlab("Prediction statistic") + ggplot2::scale_colour_hue(name = "Method") + ggplot2::theme(legend.position = c(0.875, 0.875), text = ggplot2::element_text(size = 16)) + ggplot2::scale_x_discrete(limits = c("MSPE", "MedSPE"))
+boxPlotObject <- ggplot2::ggplot(do.call("rbind", summaryPlotFrames), ggplot2::aes(x = predStatName, y = Value, colour = factor(methodName))) + ggplot2::geom_boxplot(outlier.colour = "red", outlier.shape = 1) + ggplot2::theme_bw() + ggplot2::xlab("Prediction statistic") + ggplot2::scale_colour_hue(name = "Method") + ggplot2::theme(legend.position = c(0.825, 0.875), text = ggplot2::element_text(size = 25)) + ggplot2::scale_x_discrete(limits = c("MSPE", "MedSPE"), labels = c("MSPE", "Med-SPE")) + ggplot2::ylab("Prediction error") 
+# + ggplot2::scale_y_continuous(trans = "log")
 ggplot2::ggsave(plot = boxPlotObject, filename = "outputFiles/summaryBoxPlotsK6_K4_SPDE.jpeg", device = "jpeg", width = 8, height = 8, dpi = 400)
 
+FEandHyperPlotFrames <- list(K6 = predAndFittedParsSummaries[[1]]$FEandHyperSummary$parPlotFrames, K4 = predAndFittedParsSummaries[[2]]$FEandHyperSummary$parPlotFrames)
+
+funToUpdateFrames <- function(depthName) {
+  K <- stringr::str_sub(depthName, start = -1)
+  mergedFrames <- as.data.frame(do.call("rbind", lapply(FEandHyperPlotFrames[[depthName]], function(x) x[ , c("dataIndex", "paraName", "Method", "CredInt2.5", "CredInt97.5")])))
+  mergedFrames$Method <- with(mergedFrames, replace(Method, which(Method == "ISMRA"), paste("IS-MRA (K=", K, ")", sep = "")))
+  hyperparIndices <- which(mergedFrames$paraName %in% c("space.rho", "time.rho", "scale"))
+  mergedFrames$Method <- replace(mergedFrames$Method, which(mergedFrames$Method == "SPDE"), "INLA-SPDE")
+  mergedFrames[hyperparIndices, c("CredInt2.5", "CredInt97.5")] <- exp(mergedFrames[hyperparIndices, c("CredInt2.5", "CredInt97.5")])
+  mergedFrames
+}
+
+updatedFrames <- lapply(names(FEandHyperPlotFrames), funToUpdateFrames)
+
+frameForSegmentPlots <- do.call("rbind", updatedFrames)
+keepIndices <- which(!duplicated(paste(frameForSegmentPlots$Method, frameForSegmentPlots$paraName, frameForSegmentPlots$dataIndex)))
+frameForSegmentPlots <- frameForSegmentPlots[keepIndices, ]
+numSimsForGraphs <- 50
+equivForHyper <- list(scale = bquote(sigma), space.rho = bquote(rho), time.rho = bquote(phi))
+equivForFixed <- c(elevation = "Elevation", May28 = "May 28", May29 = "May 29", EvergreenBroadleaf = "Evergreen broadleaf", MixedForest = "Mixed forest", ClosedShrublands = "Closed shrublands", Savannas = "Savannas", Grasslands = "Grasslands", PermanentWetlands = "Permanent wetlands", Croplands = "Croplands", Urban = "Urban", CroplandNaturalMosaics = "Croplands-natural mosaics", NonVegetated = "Non-vegetated")
+realParValues <- c(realFEvalues, exp(realHyperparsLogScale))
+funToGetParCredIntPlots <- function(parameterName, plotFrame, equivForFixed, realParValues, equivForHyper, numSimsForGraphs) {
+  # We won't plot credibility intervals for dataset 18, which produced a very unusually bad estimate, which throws off the graph scaling.
+  yAxisName <- NULL
+  if (parameterName %in% names(equivForHyper)) {
+    yAxisName <- equivForHyper[[parameterName]]
+  } else {
+    yAxisName <- bquote(beta ~ ": " ~ .(equivForFixed[[parameterName]]))
+  }
+  plotFrame <- subset(plotFrame, subset = (dataIndex != 18) & (dataIndex <= numSimsForGraphs + 1) & (paraName == parameterName)) # Result for sim. dataset 18 is odd
+  dataIndexShift <- c("IS-MRA (K=4)" = 0, "IS-MRA (K=6)" = max(plotFrame$dataIndex), "INLA-SPDE" = max(plotFrame$dataIndex) * 2)
+  plotFrame$dataIndex <- rank(plotFrame$dataIndex + dataIndexShift[plotFrame$Method])
+  
+  segmentPlot <- ggplot2::ggplot(plotFrame, ggplot2::aes(x = dataIndex, group = Method, colour = Method)) + ggplot2::theme_bw() + ggplot2::theme(legend.position = c(0.825, 0.875), text = ggplot2::element_text(size = 23), axis.text.x= ggplot2::element_blank()) + ggplot2::scale_colour_manual(values = c("goldenrod", "blue", "firebrick1")) + ggplot2::geom_vline(xintercept = numSimsForGraphs + 0.5, linetype="dashed", color = "black") + ggplot2::geom_vline(xintercept = numSimsForGraphs*2 + 0.5, linetype="dashed", color = "black") + ggplot2::geom_hline(yintercept = realParValues[[parameterName]], linetype="dashed", color = "red") + ggplot2::xlab("") + ggplot2::ylab(yAxisName) +
+    #ggplot2::geom_errorbar(ggplot2::aes(ymin = CredInt2.5, ymax = CredInt97.5), width = .2, position = ggplot2::position_dodge(.95))
+    ggplot2::geom_errorbar(ggplot2::aes(ymin = CredInt2.5, ymax = CredInt97.5), width = .2)
+  if (parameterName %in% c("space.rho", "time.rho", "scale")) {
+    segmentPlot <- segmentPlot + ggplot2::coord_trans(y = "log")
+    if (parameterName == "space.rho") {
+      breaks <- 1:15
+    } else if (parameterName == "time.rho") {
+      breaks <- 1:6
+    } else {
+      breaks <- 1:14
+    }
+    segmentPlot <- segmentPlot + ggplot2::scale_y_continuous(breaks = breaks)
+  }
+  ggplot2::ggsave(filename = paste("outputFiles/CredIntPlot_", parameterName, ".jpeg", sep = ""), plot = segmentPlot, device = "jpeg", width = 8, height = 8, dpi = 400)
+  NULL
+}
+lapply(unique(frameForSegmentPlots$paraName), funToGetParCredIntPlots, plotFrame = frameForSegmentPlots, equivForFixed = equivForFixed, realParValues = realParValues, equivForHyper = equivForHyper, numSimsForGraphs = numSimsForGraphs)
 
 formattedTables <- lapply(predAndFittedParsSummaries, function(x) {
   methodNames <- c("SPDE", "ISMRA")

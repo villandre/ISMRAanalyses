@@ -36,7 +36,7 @@ We then import land cover and elevation values from the MODIS and ASTER data fil
 ```{r, eval=FALSE}
 folderForEarthDataFiles <- "/store/luc/rawDataFiles/"
 landCoverFiles <- list.files(folderForEarthDataFiles, pattern = "MCD*", full.names = TRUE)
-landCoverRasterSinusoidal <- produceLandCover(landCoverFiles, regionPolygon = MaharashtraPolygonOtherCRS)
+landCoverRasterSinusoidal <- produceLandCover(landCoverFiles)
 elevationFiles <- list.files(path = folderForEarthDataFiles, pattern = "*dem.tif", full.names = TRUE)
 elevationRasterList <- lapply(elevationFiles, raster::raster)
 ```
