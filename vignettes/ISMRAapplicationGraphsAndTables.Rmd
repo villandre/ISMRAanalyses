@@ -11,7 +11,7 @@ knitr::opts_chunk$set(
   comment = "#>"
 )
 ```
-We start by loading required libraries
+We start by loading the required libraries.
 ```{r setup}
 if ("package:ISMRAanalyses" %in% search()) {
   detach("package:ISMRAanalyses", unload = TRUE)
@@ -40,14 +40,11 @@ RandomFields::RFoptions(cores = 1)
 blas_set_num_threads(1)
 omp_set_num_threads(1)
 ```
-
+Now, we load all datasets required for producing the results presented in the article.
 ```{r, eval=FALSE}
 # Input in variable rawDataFilesLocation the folder name where MODIS data files are found
 
-# rawDataFilesLocation <- "data/"
 rawDataFilesLocation <- "/store/luc/rawDataFiles"
-
-######### Loading datasets necessary for analyses ########################
 
 trainingDataValidationName <- load("data/mainDataCompleteMap_May18_24.Rdata")
 trainingDataValidation <- get(trainingDataValidationName)
@@ -79,11 +76,9 @@ rm(list = trainingDataMainName)
 indiaAnalysisMainName <- load("outputFiles/indiaAnalysisMay28evenLarger_May25_31_VersionApril13.Rdata")
 indiaAnalysisMain <- get(indiaAnalysisMainName)
 rm(list = indiaAnalysisMainName)
-
-######### END: Loading datasets necessary for analyses ########################
-
-######## Obtaining basic LST plots ########
-
+```
+We now produce the basic raster plots for the observed land surface temperatures, with cities and geopolitical boundaries overlaid. 
+```{r, eval=FALSE}
 # Naming convention: nnnnnnn.Ayyyyddd.h00v00.vvv.yyyydddhhmmss.
 # nnnnnnn: Product name
 # Ayyyyddd: Sampling date, year (yyyy), then day (ddd), between 1 and 365.
@@ -97,7 +92,6 @@ collectionDatesPOSIX <- as.POSIXct(paste("2012-05-", dayRange, sep = ""))
 
 splitTemperaturesBySatellite <- lapply(c(Terra = "MOD11A1.A2012", Aqua = "MYD11A1.A2012"), function(searchString) {
   temperatureFiles <- list.files(path = rawDataFilesLocation, pattern = searchString, full.names = TRUE)
-  # temperatureFiles <- list.files(path = "data", pattern = searchString, full.names = TRUE)
   subFiles <- sapply(paste("A2012", dayOffset + dayRange, sep = ""), grep, x = temperatureFiles, value = TRUE)
   temperatures <- lapply(subFiles, MODIS::getSds)
   splitTemperatures <- split(temperatures, f = factor(substr(subFiles, start = 0, stop = gregexpr(pattern = ".h2", text = subFiles[[1]])[[1]] - 1)))
@@ -137,11 +131,13 @@ cityPoints <- mapmisc::geocode(x = citiesNames)
 cityPointsOtherCRS <- spTransform(cityPoints, CRSobj = crs(readGDAL(splitTemperaturesBySatellite$Aqua[[1]][[1]]$SDS4gdal[1], as.is = TRUE)))
 indiaExtent <- extent(c(xmin = min(largeWesternMahaPolygonEdges[ , 1]), xmax = max(largeWesternMahaPolygonEdges[ , 1]), ymin = min(largeWesternMahaPolygonEdges[ , 2]), ymax = max(largeWesternMahaPolygonEdges[ , 2])))
 
-indiaRasterReprojected <- raster(x = indiaExtent, nrows = nrow(indiaTemperaturesLastWeek[[1]]), ncols = ncol(indiaTemperaturesLastWeek[[1]]), crs = crs(indiaPolygons)) # A bug appears when we use crs(cityPoints) (like before) instead of crs(indiaPolygons) (fixed). The printout for both crs appears to be the same, but we get 
+indiaRasterReprojected <- raster(x = indiaExtent, nrows = nrow(indiaTemperaturesLastWeek[[1]]), ncols = ncol(indiaTemperaturesLastWeek[[1]]), crs = crs(indiaPolygons)) 
+
+# A bug appears when we use crs(cityPoints) instead of crs(indiaPolygons). The printout for both crs appears to be the same, but we get 
 # > identical(crs(indiaPolygons), crs(cityPoints))
 # [1] FALSE
-# This bug results almost surely from the update in gdal.
-# Very odd:
+# This bug results probably from the update in gdal.
+# We observe the following:
 # > foo <- crs(cityPoints)
 # > bar <- crs(indiaPolygons)
 # > foo
@@ -150,8 +146,6 @@ indiaRasterReprojected <- raster(x = indiaExtent, nrows = nrow(indiaTemperatures
 # CRS arguments: +proj=longlat +datum=WGS84 +no_defs 
 # > slotNames(foo)
 # [1] "projargs"
-# > isS4(foo)
-# [1] TRUE
 # > slotNames(bar)
 # [1] "projargs"
 # > foo@projargs
@@ -165,12 +159,8 @@ indiaRasterReprojected <- raster(x = indiaExtent, nrows = nrow(indiaTemperatures
 # > object.size(bar)
 # 1560 bytes
 # The only component of both objects are identical, but the objects have different size!
-
 lapply(c("2012-05-27", "2012-05-28", "2012-05-29"), function(dateName) {
   rasterReprojected <- raster::projectRaster(from = indiaTemperaturesLastWeek[[dateName]], to = indiaRasterReprojected)
-  # originRasterAsPoints <- raster::rasterToPoints(indiaTemperaturesLastWeek[[dateName]], spatial=T)
-  # transformedPoints <- sp::spTransform(originRasterAsPoints, CRSobj = crs(indiaRasterReprojected))
-  # rasterReprojected <- raster::rasterize(transformedPoints, y = indiaRasterReprojected, field = as.vector(originRasterAsPoints@data))
   ecol <- mapmisc::colourScale(values(rasterReprojected), col = "Spectral", breaks = c(20, 25, 30, 35, 40, 45, 50, 55, 60), style='fixed', rev = TRUE,  opacity = 0.5)
   filename <- paste("outputFiles/temperatures", dateName, ".jpg", sep = "")
   jpeg(filename = filename, width = 1200, height = 1200)
@@ -184,11 +174,9 @@ lapply(c("2012-05-27", "2012-05-28", "2012-05-29"), function(dateName) {
   dev.off()
   NULL
 })
-
-######## END: Obtaining basic LST plots ########
-
-######## Obtaining plots for presenting validation task ########
-
+```
+We now produce the plots used to illustrate the validation analysis following the application we described. Uncommenting the lines used in the creation of the plots will add city names to the graphs.
+```{r, eval = FALSE}
 smallWesternMahaPolygonEdges <- rbind(c(19.55, 72.76), c(19.55, 74), c(18.35, 74), c(18.35, 72.76), c(19.55, 72.76))
 smallWesternMahaPolygonEdges <- smallWesternMahaPolygonEdges[ , 2:1]
 smallWesternMahaPolygon <- SpatialPolygons(Srl = list(Polygons(list(Polygon(coords = smallWesternMahaPolygonEdges)), ID = "Mumbai")))
@@ -243,15 +231,12 @@ raster::plot(indiaPolygons, add = TRUE)
 mapmisc::legendBreaks("bottomleft", ecolBasicValid, title = NULL, bg = "white", cex = 2.5, bty = "n")
 scaleBar(crs = crs(indiaPolygons), pos = "topleft", cex = 3, pt.cex = 2.2, title.cex = 3.5, seg.len = 3)
 dev.off()
-######## END: Producing plot to represent validation test set ########
-
-######## Checking validation error ########
-
+```
+Several prediction error summaries can be found in the text. The next chunk contains the code used to calculate them.
+```{r, eval = FALSE}
 temperaturesMay21 <- indiaTemperaturesSecondToLastWeek[["2012-05-21"]]
 temperaturesMay21reproj <- raster(x = extent(testDataValidation@sp), nrows = nrow(temperaturesMay21), ncols = ncol(temperaturesMay21), crs = crs(indiaPolygonsOtherCRS))
 temperaturesMay21reproj <- raster::projectRaster(from = temperaturesMay21, to = temperaturesMay21reproj)
-# pointsToTransfer <- raster::rasterToPoints(temperaturesMay21, spatial = TRUE)
-# temperaturesMay21reproj <- raster::rasterize(x = pointsToTransfer, y = temperaturesMay21, field = raster::values(temperaturesMay21)[!is.na(raster::values(temperaturesMay21))])
 
 recordedTemperaturesInMissingZone <- raster::extract(x = temperaturesMay21reproj, y = testDataValidation@sp@coords)
 
@@ -272,11 +257,9 @@ spObjectReprojected@coords[which.min(indiaAnalysisValidation$predMoments$Mean), 
 fieldValues <- differences[!is.na(differences)]
 sqDiffRaster <- raster::rasterize(x = spObjectReprojected, y = emptyRaster, field = fieldValues^2)
 diffRaster <- raster::rasterize(x = spObjectReprojected, y = emptyRaster, field = fieldValues)
-
-######## END: Checking validation error ########
-
-####### SPDE results analysis ############
-
+```
+The previous results were all for IS-MRA. The next chunk evaluates the predictive performance of INLA-SPDE. We re-create the mesh and transformation matrix used when we fitted the model.
+```{r, eval = FALSE}
 library(INLA)
 
 trainingDataValidation@sp <- sp::spTransform(trainingDataValidation@sp, CRSobj = sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
@@ -384,9 +367,6 @@ spObjectReprojectedSPDE <- sp::spTransform(testDataValidation@sp[!is.na(differen
 emptyRaster <- raster(x = smallRasterExtent, nrows = 120, ncols = 120, crs = sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
 diffRasterSPDE <- raster::rasterize(x = spObjectReprojectedSPDE, y = emptyRaster, field = fieldValuesSPDE)
 
-# citiesNames <- c("Mumbai", "Pune", "Nashik")
-# cityPoints <- mapmisc::geocode(x = c("Mumbai City", "Pune", "Nashik"))
-
 ecolSPDE <- mapmisc::colourScale(values(diffRasterSPDE), col = "Spectral", dec = 0, breaks = 10, rev = TRUE, style = "equal", opacity = 0.5)
 ecolSPDE <- ecolSPDE[c("col", "breaks")]
 
@@ -414,11 +394,9 @@ mapmisc::legendBreaks("bottomleft", list(breaks = round(combinedBreaks, digits =
 # text(x = cityPoints@coords[,1], y = cityPoints@coords[,2], labels = replace(citiesNames, 1, "Mumbai"), offset = 2, cex = 5, pos = 4)
 mapmisc::scaleBar(crs = crs(indiaPolygons), pos = "topleft", cex = 3, pt.cex = 2.2, title.cex = 3.5, seg.len = 3)
 dev.off()
-
-####### END: SPDE results analysis ############
-
-######## Results for main analysis ########
-
+```
+The last graph we produced presents prediction errors for IS-MRA across the entire prediction region. We could not produce it before because we wanted to use the same colour scale as for the analogous graph for SPDE, to make them easily comparable when read side-by-side. We now move on to the main analysis, on the large dataset.
+```{r, eval = FALSE}
 spAndTimeCorr <- lapply(list(space = list(paraName = "space.rho", smoothness = 1.5, distances = c(close = 1, far = 10)), time = list(paraName = "time.rho", smoothness = 0.5, distances = c(close = 1, far = 7))), function(component) {
   sapply(component$distances, function(distanceMeasure) {
     MRAinla::maternCov(d = distanceMeasure, rho = exp(indiaAnalysisMain$hyperMarginalMoments[component$paraName, "Mean"]), smoothness = component$smoothness, scale = 1)
@@ -483,9 +461,9 @@ predictionDataMain@sp@coords[predictionOrder[1:2],]
 extremeDataset <- predictionDataMain[extremeValueIndices]
 extremeDataset@data <- data.frame(Temperature = indiaAnalysisMain$predMoments$Mean[extremeValueIndices])
 
-jpeg("outputFiles/extremeValuePositions.jpeg", width = 1000, height = 1000)
-stplot(extremeDataset)
-dev.off()
+# jpeg("outputFiles/extremeValuePositions.jpeg", width = 1000, height = 1000)
+# stplot(extremeDataset)
+# dev.off()
 
 ######## Plotting predictions ########
 
@@ -499,7 +477,6 @@ predictionDataMainReproject@sp <- sp::spTransform(predictionDataMain@sp, crs(ind
 
 table(indiaAnalysisMain$predMoments$Mean[which(indiaAnalysisMain$predData$time == as.POSIXct("2012-05-28"))] <= min(indiaAnalysisMain$data$spObject@data$y[which(indiaAnalysisMain$data$time == as.POSIXct("2012-05-28"))]))
 table(indiaAnalysisMain$predMoments$Mean[which(indiaAnalysisMain$predData$time == as.POSIXct("2012-05-28"))] >= max(indiaAnalysisMain$data$spObject@data$y[which(indiaAnalysisMain$data$time == as.POSIXct("2012-05-28"))]))
-
 
 plot.INLAMRA(indiaAnalysisMain,
    filename = "outputFiles/predictionsIndiaDataMay28mainAnalysisJoint_Larger.jpg",
@@ -619,7 +596,5 @@ plot.INLAMRA(indiaAnalysisMain,
    width = 1100,
    height = 1200
 )
-
-######## END: Plotting predictions ########
 ```
 

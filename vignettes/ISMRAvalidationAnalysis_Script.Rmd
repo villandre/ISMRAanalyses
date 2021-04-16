@@ -1,0 +1,238 @@
+---
+title: "IS-MRA: Script to fit IS-MRA and INLA-SPDE"
+author: "Luc Villandr\'e"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+The first script is used to fit IS-MRA.
+```{r, eval=F}
+library(sp)
+library(raster)
+library(rgdal)
+library(rgeos)
+library(spacetime)
+library(MRAinla)
+library(RhpcBLASctl)
+
+# This ensures that no unwanted parallelisation occurs.
+# 
+blas_set_num_threads(1)
+omp_set_num_threads(1)
+
+ # Edit the following line for your system
+ # Make sure to create an "outputFiles" subfolder.
+ # Put the data files in a "data" subfolder.
+
+setwd("/home/luc/INLAMRAfiles/INLAMRApaper1/realData")
+
+## Importing data (the data files should be in subfolder data/)
+
+validationTestDataName <- load("data/testDataMay21_May18_24.Rdata")
+validationTestData <- get(validationTestDataName)
+rm(ls = validationTestDataName)
+
+validationTrainingDataName <- load("data/mainDataCompleteMap_May18_24.Rdata")
+validationTrainingData <- get(validationTrainingDataName)
+rm(ls = validationTrainingDataName)
+
+## Switching to the standard longitude/latitude projection
+
+validationTrainingData@sp <- spTransform(x = validationTrainingData@sp, CRSobj = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+validationTestData@sp <- spTransform(x = validationTestData@sp, CRSobj = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+
+## Not enough latitude variation to make it worth adjusting for it: we remove the covariate.
+
+validationTrainingData@data <- subset(validationTrainingData@data, select = -latitude)
+validationTestData@data <- subset(validationTestData@data, select = -latitude)
+
+## We center the elevation covariate.
+
+mainDataMeanElevation <- mean(validationTrainingData@data$elevation)
+validationTrainingData@data$elevation <- validationTrainingData@data$elevation - mainDataMeanElevation
+
+validationTestData@data$elevation <- validationTestData@data$elevation - mainDataMeanElevation
+
+## We define starting values for hyperparameters (on the logarithmic scale).
+
+hyperStart <- list(
+  space = c(rho = 0),
+  time = c(rho = 0),
+  scale = 0)
+
+## The following hyperparameter values are fixed.
+
+fixedEffSD <- 10
+errorSD <- 0.5 # Based on https://landval.gsfc.nasa.gov/Results.php?TitleID=mod11_valsup10
+
+fixedHyperValues <- list(
+  space = c(smoothness = log(1.5)),
+  time = c(smoothness = log(0.5)),
+  errorSD = log(errorSD),
+  fixedEffSD = log(fixedEffSD)
+)
+
+## These are the values for the mean and standard deviation parameters for the normal hyperpriors.
+
+logHyperpriorSD <- 2
+
+hyperNormalList <- list(
+  space = list(
+    smoothness = c(mu = fixedHyperValues$space[["smoothness"]], sigma = logHyperpriorSD),
+    rho = c(mu = hyperStart$space["rho"], sigma = logHyperpriorSD)),
+  time = list(
+    smoothness = c(mu = fixedHyperValues$time[["smoothness"]], sigma = logHyperpriorSD),
+    rho = c(mu = hyperStart$time["rho"], sigma = logHyperpriorSD)),
+  scale = c(mu = hyperStart$scale, sigma = logHyperpriorSD * 2),
+  errorSD = c(mu = fixedHyperValues$errorSD , sigma = logHyperpriorSD),
+  fixedEffSD = c(mu = fixedHyperValues$fixedEffSD, sigma = logHyperpriorSD))
+
+## We now run the validation analysis.
+
+indiaAnalysisValidation <- INLAMRA(
+  responseVec = validationTrainingData@data[ , "y"],
+  covariateFrame = subset(validationTrainingData@data, select = -y),
+  spatialCoordMat = validationTrainingData@sp@coords,
+  timePOSIXorNumericVec = time(validationTrainingData),
+  predCovariateFrame = validationTestData@data,
+  predSpatialCoordMat = validationTestData@sp@coords,
+  predTimePOSIXorNumericVec = time(validationTestData),
+  spatialRangeList = list(start = hyperStart$space[["rho"]], hyperpars = hyperNormalList$space$rho),
+  spatialSmoothnessList = list(start = fixedHyperValues$space[["smoothness"]]),
+  timeRangeList = list(start = hyperStart$time[["rho"]], hyperpars = hyperNormalList$time$rho),
+  timeSmoothnessList = list(start = fixedHyperValues$time[["smoothness"]]),
+  scaleList = list(start = hyperStart$scale, hyperpars = hyperNormalList$scale),
+  errorSDlist = list(start = fixedHyperValues$errorSD),
+  fixedEffSDlist = list(start = fixedHyperValues$fixedEffSD),
+   control = list(
+     Mlon = 4,
+     Mlat = 5,
+     Mtime = 0,
+     numValuesForIS = 100,
+     numKnotsRes0 = 8,
+     numIterOptim = 20,
+     numOpenMPthreads = 12L,
+     #fileToSaveOptOutput = "outputFiles/optimOutputValidation.Rdata", # Not essential, as the task is moderately short (could still be uncommented on slower systems where interrupting the code might be necessary)
+     #folderToSaveISpoints = "outputFiles/ISpointsValidation", # Not essential, as the task is moderately short (could still be uncommented on slower systems where interrupting the code might be necessary)
+     tipKnotsThinningRate = 0.5,
+     spaceJitterMax = 0, # Already jittered in spatial coordinates.
+     timeJitterMaxInDecimalDays = 0 # No need to jitter time.
+   )
+)
+
+## Results are saved in subdirectory outputFiles. Please ensure that it exists or change the file argument.
+
+save(indiaAnalysisValidation, file = "outputFiles/INLAMRA_validationAnalysis.Rdata", compress = TRUE)
+```
+The next script is used to fit SPDE. 
+```{r, eval = FALSE}
+library(INLA)
+indiaPolygons <- raster::getData(country = "IND", level = 2)
+validationTrainingData@sp <- sp::spTransform(validationTrainingData@sp, CRSobj = raster::crs(indiaPolygons))
+validationTestData@sp <- sp::spTransform(validationTestData@sp, CRSobj = raster::crs(indiaPolygons))
+
+timeVecTraining <- (as.numeric(time(validationTrainingData))-min(as.numeric(time(validationTrainingData))))/(3600*24) + 1
+timeVecTest <- (as.numeric(time(validationTestData))-min(as.numeric(time(validationTrainingData))))/(3600*24) + 1
+knots <- seq(1, max(timeVecTraining), length = max(timeVecTraining))
+mesh1 <- inla.mesh.1d(loc = knots, degree = 2, boundary = "free")
+
+## generate space mesh
+
+mesh2 <- inla.mesh.2d(loc = validationTrainingData@sp@coords[timeVecTraining == 1, ], cutoff = 0.01, offset = c(0.1, 0.2), max.n = 2000)
+
+# range0 and sigma0 control the prior means for the range and scale parameters.
+# See Lindgren INLA tutorial page 5.
+d <- 1
+alpha <- 2
+kappa <- 1 # = 1/(range parameter in my model)
+spatialSmoothness <- alpha - d/2 # cf p.3 INLA tutorial
+loghyperparaSDinMyModel <- log(10)
+# range0 and sigma0 seem to be the prior means...
+range0 <- sqrt(8 * spatialSmoothness)/kappa # sqrt(8 * spatial smoothness) / Kappa. In my model, I use 1 as prior mean for spatial range and fix smoothness at 1.5. This means Kappa = 1.
+sigma0 <- 1
+lkappa0 <- log(8 * spatialSmoothness)/2 - log(range0)
+ltau0 <- 0.5*log(gamma(spatialSmoothness)/(gamma(alpha)*(4*pi)^(d/2))) - log(sigma0) - spatialSmoothness * lkappa0
+
+## build the spatial spde
+spde <- inla.spde2.matern(mesh2, B.tau = matrix(c(ltau0, -1, spatialSmoothness), 1, 3), B.kappa = matrix(c(lkappa0, 0, -1), 1,3), theta.prior.mean = c(0,0), theta.prior.prec = c(1/loghyperparaSDinMyModel^2, 1/loghyperparaSDinMyModel^2))
+
+## build the space time indices
+STindex <- inla.spde.make.index("space", n.spde = spde$n.spde, n.group = mesh1$m)
+
+## Link data and process
+
+Atraining <- inla.spde.make.A(mesh2, loc = validationTrainingData@sp@coords, group = timeVecTraining, group.mesh = mesh1)
+Atest <- inla.spde.make.A(mesh2, loc = validationTestData@sp@coords, group = timeVecTest, group.mesh = mesh1)
+
+stackTraining <- inla.stack(data = list(y = validationTrainingData@data$y), A = list(Atraining, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 , 1, 1, 1, 1),
+ effects = list(
+  c(STindex, list(intercept = 1)),
+   list(landCover2 = validationTrainingData@data$landCover2),
+   list(landCover4 = validationTrainingData@data$landCover4),
+   list(landCover5 = validationTrainingData@data$landCover5),
+   list(landCover8 = validationTrainingData@data$landCover8),
+   list(landCover9 = validationTrainingData@data$landCover9),
+   list(landCover10 = validationTrainingData@data$landCover10),
+   list(landCover11 = validationTrainingData@data$landCover11),
+   list(landCover12 = validationTrainingData@data$landCover12),
+   list(landCover13 = validationTrainingData@data$landCover13),
+   list(landCover14 = validationTrainingData@data$landCover14),
+   list(landCover15 = validationTrainingData@data$landCover15),
+   list(elevation = validationTrainingData@data$elevation),
+   list(Aqua = validationTrainingData@data$Aqua),
+   list(time2 = validationTrainingData@data$time2),
+   list(time3 = validationTrainingData@data$time3),
+   list(time4 = validationTrainingData@data$time4),
+   list(time5 = validationTrainingData@data$time5),
+   list(time6 = validationTrainingData@data$time6),
+   list(time7 = validationTrainingData@data$time7)
+  ), tag="est")
+
+stackTest <- inla.stack(
+    data = list(y = NA),
+    A = list(Atest, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 , 1, 1, 1, 1),
+    effects = list(
+     c(STindex, list(intercept = 1)),
+      list(landCover2 = validationTestData@data$landCover2),
+      list(landCover4 = validationTestData@data$landCover4),
+      list(landCover5 = validationTestData@data$landCover5),
+      list(landCover8 = validationTestData@data$landCover8),
+      list(landCover9 = validationTestData@data$landCover9),
+      list(landCover10 = validationTestData@data$landCover10),
+      list(landCover11 = validationTestData@data$landCover11),
+      list(landCover12 = validationTestData@data$landCover12),
+      list(landCover13 = validationTestData@data$landCover13),
+      list(landCover14 = validationTestData@data$landCover14),
+      list(landCover15 = validationTestData@data$landCover15),
+      list(elevation = validationTestData@data$elevation),
+      list(Aqua = validationTestData@data$Aqua),
+      list(time2 = validationTestData@data$time2),
+      list(time3 = validationTestData@data$time3),
+      list(time4 = validationTestData@data$time4),
+      list(time5 = validationTestData@data$time5),
+      list(time6 = validationTestData@data$time6),
+      list(time7 = validationTestData@data$time7)
+     ),
+    tag = 'predictions')
+
+combinedStack <- inla.stack(stackTraining, stackTest)
+## the model
+formula <- y ~ -1 + landCover2 + landCover4 + landCover5 + landCover8 + landCover9 + landCover10 + landCover11 + landCover12 + landCover13 + landCover14 + landCover15 + elevation + Aqua + time2 + time3 + time4 + time5 + time6 + time7 + f(space, model = spde, group = space.group,
+                     control.group = list(model = "ar1"))
+
+res <- inla(formula, data = inla.stack.data(combinedStack),
+            control.predictor = list(compute = TRUE, A = inla.stack.A(combinedStack)), num.threads = 12)
+
+save(res, file = "outputFiles/inlaFitForValidationAnalysis.Rdata")
+```
+
